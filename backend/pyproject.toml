@@ -1,0 +1,29 @@
+[project]
+name = "expense-sharing-backend"
+version = "0.1.0"
+description = "Backend for the four-day expense-sharing challenge"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "Django==5.2.17",
+    "djangorestframework==3.16.1",
+    "django-cors-headers==4.9.0",
+    "python-dotenv==1.2.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "pytest-django==4.12.0",
+    "ruff==0.14.10",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py", "*_test.py", "tests.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
