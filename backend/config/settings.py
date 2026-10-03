@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -49,14 +51,38 @@ TEMPLATES = []
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
-SQLITE_PATH = Path(os.getenv("SQLITE_PATH", str(BASE_DIR / ".local" / "expenses.sqlite3")))
-SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": SQLITE_PATH,
+database_url = os.getenv("DATABASE_URL")
+if database_url is not None:
+    try:
+        if (
+            not database_url
+            or "#" in database_url
+            or any(character.isspace() for character in database_url)
+        ):
+            raise ValueError
+        database = dj_database_url.parse(database_url)
+        if (
+            database.get("ENGINE") != "django.db.backends.postgresql"
+            or not database.get("HOST")
+            or not database.get("NAME")
+        ):
+            raise ValueError
+    except ValueError:
+        # Parser errors may include credentials. Never echo the supplied URL.
+        raise ImproperlyConfigured(
+            "DATABASE_URL must be a valid PostgreSQL URL with a host and database name. "
+            "Percent-encode special characters in credentials."
+        ) from None
+    DATABASES = {"default": database}
+else:
+    SQLITE_PATH = Path(os.getenv("SQLITE_PATH", str(BASE_DIR / ".local" / "expenses.sqlite3")))
+    SQLITE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": SQLITE_PATH,
+        }
     }
-}
 
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "UTC"

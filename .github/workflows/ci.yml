@@ -58,6 +58,71 @@ jobs:
       - name: Check backend formatting
         run: uv run --locked ruff format --check .
 
+  backend-postgres:
+    name: PostgreSQL 17 checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # Disposable CI credentials, unrelated to Hamravesh.
+          POSTGRES_USER: expense_ci
+          POSTGRES_PASSWORD: ci-only-public-database-password
+          POSTGRES_DB: expense_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U expense_ci -d expense_ci"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DEBUG: "false"
+      SECRET_KEY: ci-only-public-placeholder-never-use-outside-disposable-ci
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      PYTHON_DOTENV_DISABLED: "1"
+      DATABASE_URL: postgresql://expense_ci:ci-only-public-database-password@localhost:5432/expense_ci
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: backend/.python-version
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.1"
+          working-directory: backend
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked backend dependencies
+        run: uv sync --locked
+      - name: Verify PostgreSQL backend and server version
+        run: >-
+          uv run --locked python manage.py shell -c
+          "from django.db import connection;
+          assert connection.vendor == 'postgresql';
+          assert connection.pg_version // 10000 == 17"
+      - name: Apply migrations
+        run: uv run --locked python manage.py migrate --noinput
+      - name: Seed participants
+        run: uv run --locked python manage.py seed_participants
+      - name: Verify seed can be rerun
+        run: uv run --locked python manage.py seed_participants
+      - name: Check for missing migrations
+        run: uv run --locked python manage.py makemigrations --check --dry-run
+      - name: Run Django system checks
+        run: uv run --locked python manage.py check
+      - name: Run backend tests against PostgreSQL
+        run: uv run --locked pytest -q
+
   frontend:
     name: Frontend checks
     runs-on: ubuntu-latest
