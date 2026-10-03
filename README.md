@@ -12,6 +12,8 @@ between each pair of people. Users will be seeded beforehand.
 - Frontend: Node.js 24 LTS, React 19.3.0, TypeScript 5.9.3, Vite 8.3.2,
   ESLint 9.39.1, and Vitest 5.0.3.
 - Local database: SQLite at `backend/.local/expenses.sqlite3`.
+- Production database: managed PostgreSQL 17 inside Hamravesh, with Psycopg 3
+  and `dj-database-url` for Django configuration.
 
 Exact Python and JavaScript package versions are recorded in `backend/uv.lock` and `frontend/package-lock.json`.
 The scaffold was checked with Python 3.13.14, Node 24.19.0, npm 11.17.0, and uv 0.12.1.
@@ -67,7 +69,42 @@ The backend creates the ignored `.local` directory automatically; the SQLite
 database is local development data.
 `SQLITE_PATH` optionally selects another absolute SQLite file path; leave it
 unset for local development. It does not configure a different database engine.
-Production disk/SQLite compatibility remains pending verification.
+When `DATABASE_URL` is absent, SQLite behavior stays the same. When it is set,
+it takes precedence over `SQLITE_PATH` and configures Django's PostgreSQL backend.
+An empty, malformed, or non-PostgreSQL URL fails startup with a configuration
+error; it never silently falls back to SQLite. PostgreSQL URLs must include a
+host and database name. Keep `DATABASE_URL` unset in your existing local `.env`.
+
+### Hamravesh production database
+
+Production uses the healthy managed PostgreSQL 17 resource `expense-db` in
+cluster `hamravesh-c11`, namespace `saeidirasoul-expense-sharing`. The resource
+name is **expense-db**, but the connection panel's database name is **postgres**.
+The connection is internal to the cluster. Configure `DATABASE_URL` privately
+in the backend's Hamravesh environment using the panel's internal hostname,
+port, username, and password. This is the placeholder format only:
+
+```dotenv
+DATABASE_URL=postgresql://DB_USER:DB_PASSWORD@INTERNAL_DB_HOST:5432/postgres
+```
+
+Percent-encode special characters in usernames/passwords (for example, `@`
+becomes `%40` and `#` becomes `%23`). URL query options such as `sslmode` are
+preserved; follow the connection panel's TLS settings. Keep the real URL and
+credentials out of tracked files, command output, and CI. Set production
+`SECRET_KEY`, `DEBUG=false`, and `ALLOWED_HOSTS` privately as described above.
+No Mac-to-Hamravesh connection or public database access is needed.
+
+At deployment time, run these from the **backend inside Hamravesh**, with its
+environment already configured, before serving traffic:
+
+```sh
+uv run --locked python manage.py migrate --noinput
+uv run --locked python manage.py seed_participants
+```
+
+The seed command is safe to rerun. These deployment operations have not been
+performed; this change prepares configuration and CI only.
 
 ### Frontend
 
@@ -115,15 +152,18 @@ npm run test
 npm run build
 ```
 
-Backend tests use pytest-django's isolated in-memory SQLite database, separate
-from the local development database. Frontend tests use Vitest, React Testing
+With `DATABASE_URL` unset, backend tests use pytest-django's isolated in-memory
+SQLite database, separate from local development data. With a PostgreSQL URL,
+pytest-django creates and destroys a separate `test_<database-name>` database;
+the disposable CI user can create it. Frontend tests use Vitest, React Testing
 Library, and jsdom, with mocked HTTP responses at the fetch boundary.
 
 ### Continuous integration
 
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs on pull requests and
 pushes to `main`. Its job IDs and display names are `backend` / **Backend checks**
-and `frontend` / **Frontend checks**. The jobs run the migration/seed checks,
+and `frontend` / **Frontend checks**, plus `backend-postgres` /
+**PostgreSQL 17 checks**. The existing jobs run the migration/seed checks,
 system checks, tests, lint, formatting, typecheck, and build commands above.
 Backend CI installs with `uv sync --locked`; frontend CI installs with `npm ci`.
 
@@ -132,7 +172,15 @@ hosts, and `SQLITE_PATH` under the runner's temporary directory.
 `PYTHON_DOTENV_DISABLED=1` prevents Django from reading any local `.env`, and no
 `--env-file` is supplied in CI. No production secrets are required. The frontend
 sets the public `VITE_API_BASE_URL=http://localhost:8000`; its tests mock fetch,
-so the jobs are independent. GitHub-hosted execution has not been triggered yet.
+so the jobs are independent.
+
+The separate PostgreSQL job starts a disposable `postgres:17` service with
+public CI-only credentials and a readiness check. It sets `DATABASE_URL`,
+disables `.env` loading, verifies the PostgreSQL backend/server version, applies
+migrations, runs `seed_participants` twice, checks migration drift and Django
+configuration, and runs all backend tests against PostgreSQL. It uses no
+production secrets and makes no connection to Hamravesh. GitHub-hosted execution
+requires an authorized push/PR; this configuration change does not trigger it.
 
 ## Data and API
 
@@ -176,8 +224,8 @@ Prompt 3 adds CI and completes setup and architecture documentation.
 | --- | --- |
 | 2 | Expenses list/create API, validation, pairwise balances API and financial tests. |
 | 3 | Expenses and Balances views, Add Expense modal, submission/refresh behavior, frontend integration tests. |
-| 4 | Verify Hamravesh/cloud access and durable storage, add deployment configuration, deploy when authorized, smoke test and finalize submission. |
+| 4 | Verify Hamravesh/cloud access and backend access to managed PostgreSQL, add deployment configuration, deploy when authorized, smoke test and finalize submission. |
 
-These later features are not implemented yet. Hamravesh persistent disk and
-SQLite locking/persistence compatibility are **pending verification**; see the
+These later features are not implemented yet. Production storage is managed
+PostgreSQL 17; deployment and backend connectivity checks remain pending. See the
 [storage decision](docs/architecture.md#storage-and-hamravesh-decision).

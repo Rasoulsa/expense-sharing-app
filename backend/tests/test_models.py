@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection, transaction
+from django.db import DataError, IntegrityError, connection, transaction
 from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
@@ -49,7 +49,9 @@ def test_description_limit_enforced_by_validation_and_database():
     expense = Expense(paid_by=payer, expense_for=beneficiary, amount_cents=1, description="x" * 501)
     with pytest.raises(ValidationError):
         expense.full_clean()
-    with pytest.raises(IntegrityError), transaction.atomic():
+    # PostgreSQL's varchar(500) rejects oversized values before the check constraint.
+    database_error = DataError if connection.vendor == "postgresql" else IntegrityError
+    with pytest.raises(database_error), transaction.atomic():
         expense.save()
 
 
@@ -75,4 +77,8 @@ def test_valid_directional_expense_preserves_fields_and_uses_utc():
 
 def test_database_is_isolated_from_local_development_database(settings):
     assert connection.settings_dict["NAME"] != settings.BASE_DIR / ".local" / "expenses.sqlite3"
-    assert "memory" in str(connection.settings_dict["NAME"])
+    if connection.vendor == "sqlite":
+        assert "memory" in str(connection.settings_dict["NAME"])
+    else:
+        assert connection.vendor == "postgresql"
+        assert str(connection.settings_dict["NAME"]).startswith("test_")
