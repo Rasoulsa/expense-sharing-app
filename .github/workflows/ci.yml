@@ -22,7 +22,7 @@ jobs:
       SECRET_KEY: ci-only-public-placeholder-never-use-outside-disposable-ci
       ALLOWED_HOSTS: localhost,127.0.0.1,testserver
       PYTHON_DOTENV_DISABLED: "1"
-      SQLITE_PATH: ${{ runner.temp }}/expense-sharing-ci/expenses.sqlite3
+      SQLITE_PATH: /tmp/expense-sharing-ci/expenses.sqlite3
     steps:
       - name: Check out source
         uses: actions/checkout@v7
