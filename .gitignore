@@ -1,0 +1,34 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+
+# Local agent instructions, transcripts, prompts, and notes
+AGENTS.md
+AGENTS.override.md
+.codex/
+.codex-log/
+codex-prompts/
+codex-notes/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Local development data
+backend/.local/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
