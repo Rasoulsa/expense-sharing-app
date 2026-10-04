@@ -25,7 +25,7 @@ services:
       SECRET_KEY: disposable-smoke-only-public-placeholder-never-use-in-production
       ALLOWED_HOSTS: localhost,127.0.0.1,backend
       CORS_ALLOWED_ORIGIN: http://localhost:8080
-      # Local smoke has no TLS ingress; production defaults to true.
+      # Explicit HTTP smoke setting; production also delegates redirects to ingress.
       SECURE_SSL_REDIRECT: "false"
     ports:
       - "127.0.0.1:8000:8000"

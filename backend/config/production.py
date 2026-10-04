@@ -76,7 +76,9 @@ else:
 USE_X_FORWARDED_HOST = False
 USE_X_FORWARDED_PORT = False
 
-redirect = os.getenv("SECURE_SSL_REDIRECT", "true").strip().lower()
+# Hamravesh terminates TLS and its domain ingress owns HTTPS Redirect. Without
+# verified proxy scheme headers, Django would redirect HTTPS clients to themselves.
+redirect = os.getenv("SECURE_SSL_REDIRECT", "false").strip().lower()
 if redirect not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
     raise ImproperlyConfigured("SECURE_SSL_REDIRECT must be a boolean.")
 SECURE_SSL_REDIRECT = redirect in {"true", "1", "yes", "on"}
