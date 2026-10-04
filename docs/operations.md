@@ -21,7 +21,7 @@ balances during release and rollback. The API remains anonymous.
 | Frontend app | Separate app, proposed name `expense-web`, container port **80** | Actual app name, registry access, resources, routing, and rollout controls. |
 | Public backend origin | `https://api.example.com` is a placeholder | Actual DNS, certificate, ownership, and access from Iran. |
 | Public frontend origin | `https://app.example.com` is a placeholder | Actual DNS, certificate, ownership, and access from Iran. |
-| HTTPS proxy | No forwarded scheme header trusted by default | Actual header/value, stripping of client values, Host preservation, redirects, and prevention of ingress bypass. |
+| HTTPS proxy | Hamravesh terminates TLS; its domain ingress owns HTTPS Redirect. No forwarded scheme header trusted by default | HTTPS Redirect enabled on every public app domain, non-looping HTTPS, Host preservation, and prevention of ingress bypass. Verify header/value sanitization before enabling any proxy-header trust. |
 | Backups | Private encrypted durable storage, recurring and pre-release backups, restore drill | Provider controls, destination, frequency/retention, operator, recovery objectives, restore privileges, and any point-in-time recovery capability. |
 
 Never deploy placeholder domains or disposable CI secrets. Verify the panel's
@@ -110,8 +110,13 @@ Configure two apps in the verified network/namespace:
   header/value and sanitization are verified, then set both explicitly.
   Gunicorn's implicit forwarded-scheme trust is disabled; forwarded-host/port
   trust stays disabled. Clients must not bypass the trusted ingress.
-- Keep `SECURE_SSL_REDIRECT=true` unless verified ingress enforces redirects for
-  every public HTTP API request and an explicit ingress-only choice is recorded.
+- Enable Hamravesh's **HTTPS Redirect** setting at the domain ingress for every
+  public backend and frontend domain before serving users. Hamravesh terminates
+  TLS and must redirect public HTTP requests to HTTPS.
+- Leave `SECURE_SSL_REDIRECT` unset or set it to `false` (the production default).
+  Remove any stale `true` override from the backend environment. Django receives
+  HTTP behind the TLS ingress; enabling its redirect without a verified scheme
+  header makes public HTTPS API requests redirect to the same HTTPS URL.
   Start with `SECURE_HSTS_SECONDS=0`; after HTTPS verification, consider a short
   duration such as 3600. Subdomain inclusion and preload stay false.
 
@@ -154,17 +159,18 @@ Hamravesh behaviors has been tested yet. Follow
 
 ### Actual check --deploy warnings
 
-Production defaults currently report **W003** and **W004**, with none silenced:
+Production defaults report **W003**, **W004**, and **W008**, with none silenced:
 
 | Warning | Reason and action |
 | --- | --- |
 | `security.W003` | No `CsrfViewMiddleware`. DRF is intentionally anonymous, JSON-only, and has no session/cookie authentication. Keep the warning visible; CORS is not authorization. Revisit CSRF if cookie-based authority is introduced in future scope. |
 | `security.W004` | HSTS duration is 0 pending real HTTPS verification. Local HTTP smoke does not verify HTTPS or HSTS. |
+| `security.W008` | Django's `SECURE_SSL_REDIRECT` is false because Hamravesh's domain ingress handles HTTP-to-HTTPS redirects. This is expected with proxy-managed redirects. Keep the warning visible and require HTTPS Redirect on every public app domain; do not enable Django redirects just to remove it. |
 
-The disposable HTTP environment sets `SECURE_SSL_REDIRECT=false`, so checking
-that environment additionally reports **W008**. Image CI overrides it to true
-only for the deploy-check command and reports W003/W004; that does not test a
-TLS ingress. With positive HSTS duration and the current false subdomain/preload
+The disposable HTTP environment also sets `SECURE_SSL_REDIRECT=false` and reports
+the same warnings. Existing image CI overrides it to true only for the deploy-check
+command and reports W003/W004; that override does not represent production defaults
+or test a TLS ingress. With positive HSTS duration and the current false subdomain/preload
 flags, W004 is replaced by **W005** and **W021**. Investigate any other warning
 or error. No production deploy check or HTTPS ingress test has been performed.
 
@@ -179,8 +185,8 @@ gates are pending verification. Configure these exact paths and ports:
 | Backend readiness | 8000, `GET /health/ready/` | 200 JSON `{"status":"ready"}` when the database/schema work; 503 otherwise. An empty usable table is ready. |
 | Frontend health | 80, `GET /health/` | 200 text `ok`. |
 
-Backend probes must send an allowed Host. Both backend health paths bypass
-HTTPS redirects for internal HTTP checks and still validate Host. Docker's
+Backend probes must send an allowed Host. Both backend health paths accept
+internal HTTP checks without Django redirects and still validate Host. Docker's
 probe checks liveness with the first parsed `ALLOWED_HOSTS` entry, after trimming
 whitespace and removing empty entries; provider readiness must be configured
 separately.

@@ -70,7 +70,7 @@ Production settings also work with `manage.py --settings=config.production`.
 | `CORS_ALLOWED_ORIGIN` | Required single exact frontend origin, e.g. `https://app.example.com`, without a trailing slash, path, query, or credentials. No wildcard origins or credentialed CORS. |
 | `SECURE_PROXY_SSL_HEADER` | Optional verified proxy header in Django META format, e.g. `HTTP_X_VERIFIED_SCHEME`. No default header is trusted. Must be supplied together with the next value. |
 | `SECURE_PROXY_SSL_VALUE` | Exact verified header value identifying HTTPS, e.g. `https`. |
-| `SECURE_SSL_REDIRECT` | Defaults to true. Local HTTP smoke sets false. Keep true for production unless the ingress enforces HTTPS for every public API request and you explicitly choose ingress-only redirects. |
+| `SECURE_SSL_REDIRECT` | Defaults to false. Leave unset or false for Hamravesh; enable HTTPS Redirect at the domain ingress for every public backend/frontend domain. Remove stale true overrides to avoid HTTPS self-redirects behind TLS termination. |
 | `SECURE_HSTS_SECONDS` | Defaults to 0 until public HTTPS is verified. After verification, start with a short duration such as 3600. Subdomain inclusion and preload remain disabled. |
 
 Use the database name `postgres` from the connection panel, not the resource name
@@ -78,6 +78,12 @@ Use the database name `postgres` from the connection panel, not the resource nam
 requirements. Never supply backend credentials as Docker build arguments.
 
 ## Verify the HTTPS ingress before enabling proxy trust
+
+Hamravesh terminates TLS. Enable its **HTTPS Redirect** setting at each public
+backend and frontend domain ingress before serving users. Django leaves
+HTTP-to-HTTPS redirection to this ingress. With no trusted scheme header,
+Django sees ingress traffic as HTTP; enabling `SECURE_SSL_REDIRECT` would make
+public HTTPS API requests redirect back to the same HTTPS URL.
 
 Packaging does not assume Hamravesh emits `X-Forwarded-Proto` or any other header.
 Verify the actual header name and exact value, that the ingress strips client
@@ -133,8 +139,11 @@ Review `check --deploy` output rather than suppressing warnings:
 - With HSTS enabled, `security.W005` and `security.W021` report deliberately
   disabled subdomain inclusion/preload. Confirm domain ownership and HTTPS on
   every affected host before considering those separately.
-- The HTTP-only local smoke additionally reports `security.W008` because it
-  explicitly disables redirects. This override belongs only to local smoke.
+- `security.W008` is expected in production and the local HTTP smoke because
+  Django redirects are disabled while Hamravesh's domain ingress handles public
+  HTTP-to-HTTPS redirects. Keep it visible and require the provider's HTTPS
+  Redirect setting. The existing image CI check overrides redirects to true for
+  that command alone, so its W003/W004 output omits this production warning.
 
 Other deployment warnings/errors require investigation. No production command
 has been run against Hamravesh as part of packaging.

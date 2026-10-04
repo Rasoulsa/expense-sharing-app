@@ -11,6 +11,7 @@ PROBE = """
 import json
 import django
 from django.conf import settings
+from django.core.checks import run_checks
 from django.test import Client
 django.setup()
 client = Client(HTTP_HOST="api.example.test")
@@ -23,7 +24,6 @@ print(json.dumps({
     "hsts": settings.SECURE_HSTS_SECONDS,
     "forwarded_host": settings.USE_X_FORWARDED_HOST,
     "live": client.get("/health/live/").status_code,
-    "plain": client.get("/api/participants/").status_code,
     "cors": client.get("/health/live/", HTTP_ORIGIN="https://app.example.test").get(
         "Access-Control-Allow-Origin"),
     "untrusted_cors": client.get("/health/live/", HTTP_ORIGIN="https://other.example.test").get(
@@ -32,7 +32,85 @@ print(json.dumps({
         "Strict-Transport-Security"),
     "hsts_unconfigured": client.get("/health/live/", HTTP_X_FORWARDED_PROTO="https").get(
         "Strict-Transport-Security"),
+    "deploy_warnings": sorted(check.id for check in run_checks(include_deployment_checks=True)),
 }))
+"""
+
+API_PROBE = """
+import json
+from unittest.mock import patch
+import django
+from django.http import Http404
+from django.test import Client
+django.setup()
+from expenses.views import ExpenseDelete, ExpenseListCreate, ParticipantList
+
+def describe(response):
+    return {
+        "status": response.status_code,
+        "location": response.get("Location"),
+        "body": response.json() if response.get("Content-Type") == "application/json" else None,
+        "cors": response.get("Access-Control-Allow-Origin"),
+    }
+
+client = Client(HTTP_HOST="api.example.test")
+results = []
+# Mock only database-facing methods; production middleware and API handlers run.
+with (
+    patch.object(ParticipantList, "get_queryset", return_value=[]),
+    patch.object(ExpenseListCreate, "get_queryset", return_value=[]),
+    patch("expenses.views.calculate_balances", return_value=[]),
+    patch.object(ExpenseDelete, "get_object", side_effect=Http404),
+):
+    for scheme in (None, "http", "https"):
+        headers = {"HTTP_ORIGIN": "https://app.example.test"}
+        if scheme is not None:
+            headers["HTTP_X_FORWARDED_PROTO"] = scheme
+        results.append({
+            "participants": describe(client.get("/api/participants/", **headers)),
+            "expenses": describe(client.get("/api/expenses/", **headers)),
+            "balances": describe(client.get("/api/balances/", **headers)),
+            "post_person": describe(client.post(
+                "/api/participants/", data={"name": ""},
+                content_type="application/json", **headers)),
+            "post_expense": describe(client.post(
+                "/api/expenses/", data={}, content_type="application/json", **headers)),
+            "delete_missing": describe(client.delete("/api/expenses/999/", **headers)),
+        })
+    untrusted_cors = describe(client.get(
+        "/api/participants/", HTTP_ORIGIN="https://other.example.test"))
+    untrusted_host = client.get(
+        "/api/participants/", HTTP_HOST="other.example.test").status_code
+print(json.dumps({"requests": results, "untrusted_cors": untrusted_cors,
+                  "untrusted_host": untrusted_host}))
+"""
+
+HEALTH_PROBE = """
+import json
+from unittest.mock import patch
+import django
+from django.db import OperationalError, connection
+from django.test import Client
+django.setup()
+from expenses.models import Participant
+
+def describe(response):
+    return {"status": response.status_code, "body": response.json(),
+            "location": response.get("Location")}
+
+client = Client(HTTP_HOST="api.example.test")
+with patch.object(connection, "cursor", side_effect=AssertionError("Database accessed")):
+    live = describe(client.get("/health/live/"))
+with patch.object(Participant.objects, "exists", return_value=False) as query:
+    ready = describe(client.get("/health/ready/"))
+    query.assert_called_once_with()
+with patch.object(Participant.objects, "exists", side_effect=OperationalError("unavailable")):
+    unavailable = describe(client.get("/health/ready/"))
+with patch.object(connection, "cursor", side_effect=AssertionError("Database accessed")):
+    untrusted_hosts = [client.get(path, HTTP_HOST="other.example.test").status_code
+                       for path in ("/health/live/", "/health/ready/")]
+print(json.dumps({"live": live, "ready": ready, "unavailable": unavailable,
+                  "untrusted_hosts": untrusted_hosts}))
 """
 
 
@@ -59,11 +137,11 @@ def production_probe(tmp_path):
         CORS_ALLOWED_ORIGIN="https://app.example.test",
     )
 
-    def run(**overrides):
+    def run(*, script=PROBE, **overrides):
         probe_env = env | overrides
         probe_env = {key: value for key, value in probe_env.items() if value is not None}
         result = subprocess.run(
-            [sys.executable, "-c", PROBE],
+            [sys.executable, "-c", script],
             cwd=BACKEND_DIR,
             env=probe_env,
             capture_output=True,
@@ -85,15 +163,46 @@ def test_production_defaults_and_exact_cors(production_probe):
         "database": "django.db.backends.postgresql",
         "origins": ["https://app.example.test"],
         "proxy": None,
-        "redirect": True,
+        "redirect": False,
         "hsts": 0,
         "forwarded_host": False,
         "live": 200,
-        "plain": 301,
         "cors": "https://app.example.test",
         "untrusted_cors": None,
         "hsts_forwarded": None,
         "hsts_unconfigured": None,
+        "deploy_warnings": ["security.W003", "security.W004", "security.W008"],
+    }
+
+
+def test_production_api_requests_do_not_redirect(production_probe):
+    result = production_probe(script=API_PROBE)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    for responses in data["requests"]:
+        for name, response in responses.items():
+            assert response["location"] is None
+            assert response["cors"] == "https://app.example.test"
+            if name.startswith("post_"):
+                assert response["status"] == 400
+                assert response["body"]
+            elif name == "delete_missing":
+                assert response["status"] == 404
+            else:
+                assert response["status"] == 200
+                assert response["body"] == []
+    assert data["untrusted_cors"] == {"status": 200, "location": None, "body": [], "cors": None}
+    assert data["untrusted_host"] == 400
+
+
+def test_production_health_endpoints_do_not_redirect_and_validate_hosts(production_probe):
+    result = production_probe(script=HEALTH_PROBE)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "live": {"status": 200, "body": {"status": "alive"}, "location": None},
+        "ready": {"status": 200, "body": {"status": "ready"}, "location": None},
+        "unavailable": {"status": 503, "body": {"status": "not_ready"}, "location": None},
+        "untrusted_hosts": [400, 400],
     }
 
 
@@ -108,7 +217,7 @@ def test_only_explicit_proxy_header_marks_https(production_probe):
     assert settings["proxy"] == ["HTTP_X_VERIFIED_SCHEME", "https"]
     assert settings["hsts_forwarded"] == "max-age=3600"
     assert settings["hsts_unconfigured"] is None
-    assert settings["plain"] == 301
+    assert settings["redirect"] is False
     assert settings["live"] == 200
 
 
