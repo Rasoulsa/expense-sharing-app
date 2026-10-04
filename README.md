@@ -1,9 +1,9 @@
 # Expense Sharing App
 
 The authoritative interview requirements are in [docs/challenge-spec.md](docs/challenge-spec.md).
-Design decisions and the Day 2–4 plan are in [docs/architecture.md](docs/architecture.md).
-An expense is directional: the beneficiary owes the payer. Balances will be netted
-between each pair of people. Users will be seeded beforehand.
+Design decisions and the implementation plan are in [docs/architecture.md](docs/architecture.md).
+An expense is directional: the beneficiary owes the payer. Balances are netted
+between each pair of people. Participants are seeded beforehand.
 
 ## Stack
 
@@ -187,8 +187,9 @@ requires an authorized push/PR; this configuration change does not trigger it.
 `Participant.name` is unique and limited to 100 characters; empty and
 whitespace-only names fail model validation. The database also rejects empty
 and space-only names. `Expense` stores a payer and beneficiary, a positive
-integer amount in cents, a description of at most 500 characters (empty is
-allowed), and a server-generated UTC creation timestamp. Database constraints
+integer amount in cents, a description of at most 500 characters, and a
+server-generated UTC creation timestamp. The model permits empty descriptions;
+the expense API requires a nonempty description after trimming. Database constraints
 reject nonpositive amounts, identical payer/beneficiary pairs, and oversized
 descriptions. Participant deletion is protected when an expense references it.
 
@@ -199,13 +200,87 @@ existing participants and expenses intact and does not create expenses.
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /api/participants/` | Anonymous JSON array of `{id, name}`, ordered by name then id; empty tables return `[]`. Writes return 405. |
+| `GET /api/expenses/` | Anonymous array of expenses, ordered by descending `created_at`, then descending `id`; returns `[]` when empty. |
+| `POST /api/expenses/` | Anonymous creation using participant IDs, a decimal string amount, and description; returns the created expense with 201. Invalid fields return 400 with field errors. PUT, PATCH, and DELETE return 405. |
+| `GET /api/balances/` | Anonymous array of pairwise debts, ordered by debtor ID then creditor ID; returns `[]` when empty or all pairs cancel. All other methods return 405. |
 | `GET /health/live/` | Process liveness, returns `{"status":"alive"}` without database access. |
 | `GET /health/ready/` | Checks database access and the participant table; returns `{"status":"ready"}`, or 503 with `{"status":"not_ready"}` when unavailable. An empty usable table is ready. |
+
+### Request and response examples
+
+`GET /api/participants/` returns, for example:
+
+```json
+[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+```
+
+Use IDs returned by that endpoint. `POST /api/expenses/` accepts:
+
+```json
+{
+  "paid_by": 1,
+  "expense_for": 2,
+  "amount": "50.00",
+  "description": "Lunch"
+}
+```
+
+Both participants must exist and be distinct. Amounts must be strings of ASCII
+digits, optionally followed by a decimal point and one or two digits, with a
+value from `0.01` through `999999.99`. For example, `"1"`, `"1.2"`, and `"1.23"`
+are accepted. Numeric JSON amounts, exponent notation, signs, zero, negative
+values, whitespace, and more than two decimal places are rejected. Conversion
+uses `Decimal` and stores integer cents without floating-point arithmetic.
+Descriptions are required, trimmed, nonempty, and at most 500 characters after
+trimming. The expense's `id` and `created_at` are server-owned.
+
+The 201 response is an expense object; `GET /api/expenses/` returns an array of
+these objects. Participant details are nested, amounts always have two decimal
+places, and timestamps use UTC ISO 8601:
+
+```json
+{
+  "id": 1,
+  "paid_by": {"id": 1, "name": "Alice"},
+  "expense_for": {"id": 2, "name": "Bob"},
+  "amount": "50.00",
+  "description": "Lunch",
+  "created_at": "2026-10-04T10:00:00Z"
+}
+```
+
+With only that expense, `GET /api/balances/` returns:
+
+```json
+[
+  {
+    "debtor": {"id": 2, "name": "Bob"},
+    "creditor": {"id": 1, "name": "Alice"},
+    "amount": "50.00"
+  }
+]
+```
+
+### Pairwise calculation
+
+Every balance query derives debts from persisted expenses using integer cents;
+there are no separate balance records. Repeated payments add within an unordered
+participant pair, and reverse payments subtract. If Alice pays `50.00` for Bob
+and Bob pays `20.00` for Alice, Bob owes Alice `30.00`. If reverse payments exceed
+the original payments, the debtor and creditor switch. Exact zero pairs are
+omitted; all returned amounts are positive strings with two decimal places.
+Totals may exceed the per-expense input cap.
+
+Pairs remain independent. If Bob also pays `25.00` for Charlie, Charlie owes Bob
+`25.00`; it does not change Bob's debt to Alice or create a Charlie-to-Alice debt.
+Chains and cycles remain pairwise; no global or transitive simplification occurs.
 
 Local URLs:
 
 - Frontend: `http://localhost:5173/`
 - Participants: `http://localhost:8000/api/participants/`
+- Expenses: `http://localhost:8000/api/expenses/`
+- Balances: `http://localhost:8000/api/balances/`
 - Liveness: `http://localhost:8000/health/live/`
 - Readiness: `http://localhost:8000/health/ready/`
 
@@ -213,16 +288,17 @@ With both local servers running, open the frontend to see the seeded names.
 For a simple API smoke check, run `curl --fail http://localhost:8000/api/participants/`
 and `curl --fail http://localhost:8000/health/ready/`.
 
-## Day 1 scope
+## Implemented scope and remaining work
 
 Prompt 2 adds the Participant and Expense models, initial migration, participant
 seed command, read-only participants API, and health checks. The frontend
 fetches participant names and shows loading, empty, error, and retry states.
 Prompt 3 adds CI and completes setup and architecture documentation.
+Day 2 adds the expense list/create API, validation, a service deriving pairwise
+balances from persisted expenses, the balances API, and focused financial/API tests.
 
 | Day | Planned work |
 | --- | --- |
-| 2 | Expenses list/create API, validation, pairwise balances API and financial tests. |
 | 3 | Expenses and Balances views, Add Expense modal, submission/refresh behavior, frontend integration tests. |
 | 4 | Verify Hamravesh/cloud access and backend access to managed PostgreSQL, add deployment configuration, deploy when authorized, smoke test and finalize submission. |
 
