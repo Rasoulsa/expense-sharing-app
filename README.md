@@ -100,12 +100,16 @@ At deployment time, run these from the **backend inside Hamravesh**, with its
 environment already configured, before serving traffic:
 
 ```sh
-uv run --locked python manage.py migrate --noinput
-uv run --locked python manage.py seed_participants
+python manage.py check --deploy
+python manage.py migrate --noinput
+python manage.py seed_participants
 ```
 
-The seed command is safe to rerun. These deployment operations have not been
-performed; this change prepares configuration and CI only.
+These commands target the production image, whose PATH contains its locked
+Python environment. The seed command is safe to rerun. Production operations
+have not been performed. See [production packaging](docs/production-packaging.md)
+for required runtime settings, ingress verification, root-context image builds,
+and a disposable local PostgreSQL container smoke setup.
 
 ### Frontend
 
@@ -211,8 +215,9 @@ report, run `npx playwright show-report` from `frontend`.
 [.github/workflows/ci.yml](.github/workflows/ci.yml) runs on pull requests and
 pushes to `main`. Its job IDs and display names are `backend` / **Backend checks**
 and `frontend` / **Frontend checks**, plus `backend-postgres` /
-**PostgreSQL 17 checks**, and `browser` / **Browser tests**. The original three
-jobs retain their names and behavior. They run the migration/seed checks,
+**PostgreSQL 17 checks**, `browser` / **Browser tests**, and `production-images` /
+**Production images**. The existing four jobs retain their names and behavior.
+They run the migration/seed checks,
 system checks, tests, lint, formatting, typecheck, and build commands above.
 Backend CI installs with `uv sync --locked`; frontend CI installs with `npm ci`.
 
@@ -235,6 +240,15 @@ The independent Browser tests job installs from both lockfiles, installs
 Chromium with its Ubuntu dependencies, then runs `npm run e2e`. The same
 launcher creates and cleans a fresh temporary SQLite database for this job.
 The job uses public disposable settings and no Hamravesh credentials or secrets.
+
+The Production images job builds both Dockerfiles from repository-root context,
+using locked dependencies and a harmless public frontend API URL. It runs the
+existing disposable PostgreSQL 17 container smoke, reviews deployment checks,
+shows logs on failure, and always removes the temporary stack. It publishes no
+images and performs no deployment. See [operations](docs/operations.md) for
+green-PR promotion from `main` to `release`, separate Hamravesh app configuration,
+release commands, backups/restoration, acceptance checks, and rollback. Provider
+settings and real public URLs remain pending verification.
 
 ## Data and API
 
@@ -400,6 +414,9 @@ the change from `Bob owes Alice $30.00` to `$50.00` after removing the reverse e
 | --- | --- |
 | 4 | Verify Hamravesh/cloud access and backend access to managed PostgreSQL, add deployment configuration, deploy when authorized, smoke test and finalize submission. |
 
-Day 4 remains pending. Production storage is managed
-PostgreSQL 17; deployment and backend connectivity checks remain pending. See the
+Day 4 production packaging adds backend Gunicorn and frontend Nginx images,
+strict container settings, and a disposable local PostgreSQL 17 smoke setup.
+See [production packaging](docs/production-packaging.md) for build and release
+commands and the required HTTPS ingress verification. Production storage is managed
+PostgreSQL 17; deployment and production connectivity checks remain pending. See the
 [storage decision](docs/architecture.md#storage-and-hamravesh-decision).

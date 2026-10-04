@@ -198,3 +198,50 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Run browser test against Django and Vite
         run: npm run e2e
+
+  production-images:
+    name: Production images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python for the HTTP smoke script
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: backend/.python-version
+      - name: Verify Docker tooling
+        run: |
+          docker version
+          docker compose version
+      - name: Build locked backend production image from root
+        run: docker build -f backend/Dockerfile -t expense-sharing-backend:day4 .
+      - name: Build frontend production image with public test URL from root
+        run: >-
+          docker build -f frontend/Dockerfile
+          --build-arg VITE_API_BASE_URL=http://localhost:8000
+          -t expense-sharing-frontend:day4 .
+      - name: Start disposable PostgreSQL 17 and frontend
+        run: docker compose -f compose.smoke.yml up -d --no-build --wait --wait-timeout 60 db frontend
+      - name: Run one-off migrations and idempotent seeds
+        run: |
+          docker compose -f compose.smoke.yml run --rm backend python manage.py migrate --noinput
+          docker compose -f compose.smoke.yml run --rm backend python manage.py seed_participants
+          docker compose -f compose.smoke.yml run --rm backend python manage.py seed_participants
+      - name: Start backend and review deployment checks
+        run: |
+          docker compose -f compose.smoke.yml up -d --no-build --wait --wait-timeout 60 backend
+          docker compose -f compose.smoke.yml exec -T -e SECURE_SSL_REDIRECT=true backend python manage.py check --deploy
+          docker compose -f compose.smoke.yml exec -T backend python manage.py shell -c "from django.db import connection; assert connection.vendor == 'postgresql'; assert connection.pg_version // 10000 == 17"
+      - name: Run existing container HTTP and API smoke
+        run: python3 backend/scripts/smoke_containers.py
+      - name: Show container diagnostics on failure
+        if: failure()
+        run: |
+          docker compose -f compose.smoke.yml ps --all
+          docker compose -f compose.smoke.yml logs --no-color --tail 200
+      - name: Remove disposable containers and database
+        if: always()
+        run: docker compose -f compose.smoke.yml down --volumes --remove-orphans

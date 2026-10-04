@@ -232,20 +232,50 @@ sanitized configuration error instead of selecting SQLite. When `DATABASE_URL`
 is absent, the existing local `.env`, default SQLite file, and `SQLITE_PATH`
 override continue to work.
 
-At deployment time, run `uv run --locked python manage.py migrate --noinput`
-and `uv run --locked python manage.py seed_participants` from the backend inside
+At deployment time, run `python manage.py check --deploy`,
+`python manage.py migrate --noinput`, and `python manage.py seed_participants`
+from the production backend image inside
 Hamravesh, with the private production environment injected, before serving
 traffic. Seeds remain idempotent and preserve existing data. No production
-credentials belong in Git or GitHub CI. This preparation adds database
-configuration and CI coverage; no deployment or production data operation has
-been performed. Day 4 still needs deployment, internal backend connectivity,
-and backup/restore verification for managed PostgreSQL.
+credentials belong in Git or GitHub CI. No deployment or production data
+operation has been performed. Day 4 still needs authorized deployment, internal
+backend connectivity, and backup/restore verification for managed PostgreSQL.
+
+## Day 4 packaging boundary
+
+Both Dockerfiles build from the repository root with its `.dockerignore`.
+The backend installs only locked production dependencies and runs Gunicorn
+through `config.wsgi:application`, using `config.production` on port 8000 as a
+non-root user. That settings module requires PostgreSQL, a production key,
+explicit allowed hosts, and one exact frontend CORS origin; local SQLite and
+both existing database CI jobs retain `config.settings`. The JSON-only API
+requires no static asset server. Migrations and seeds are one-off release
+commands, never part of builds or worker startup.
+
+The frontend builds with npm ci/Vite and a required public `VITE_API_BASE_URL`
+build argument, then serves `dist` with Nginx on port 80, including `/health/`
+and SPA fallback. The URL is compiled into JavaScript and changes require a
+rebuild. The typed client and Day 3 application behaviors remain unchanged.
+Production defaults to HTTPS redirects and trusts no forwarded scheme header
+until the actual ingress sanitization/header contract is verified. Health
+probes are exempt from redirects. HSTS awaits HTTPS verification.
+
+[Production packaging](production-packaging.md) records the complete environment
+contract, deployment-check warnings, ingress requirements, and disposable local
+`compose.smoke.yml` workflow. That PostgreSQL 17 tmpfs database is independent
+of Hamravesh. Packaging ends before cloud resources or deployment.
 
 ## Checks and CI
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `main` with
 `Backend checks`, `Frontend checks`, `PostgreSQL 17 checks`, and `Browser tests`.
-The original three job definitions remain unchanged. The independent browser
+It also includes `Production images`; the existing four job definitions remain
+unchanged. The image job builds both root-context Dockerfiles, uses public
+disposable settings, migrates/seeds a temporary PostgreSQL 17 database, and runs
+the existing container HTTP/API smoke before cleanup. It publishes no image and
+performs no deployment. [Operations](operations.md) defines the future
+main-to-release promotion, verified provider configuration, backups, restore,
+and rollback procedure. The independent browser
 job installs both lockfiles and Chromium with Ubuntu system dependencies, then
 runs the real-server journey with public disposable settings and no secrets.
 Python 3.13 and Node 24 are selected from the projects' version files.
@@ -280,4 +310,4 @@ Hamravesh credentials.
 | 1 | Scaffold, Participant and Expense models, migration, idempotent seeds, read-only participants API, health checks, participant page states, focused tests, CI, setup and architecture docs. | Implemented locally; first GitHub-hosted CI execution awaits an authorized push/PR. |
 | 2 | Expense creation/list APIs, input validation, pairwise balance calculation and API, focused financial and API tests. | Implemented locally in slices 1 and 2; CI execution awaits an authorized push/PR. |
 | 3 | One-page Expenses and Balances views, accessible Add Expense and optional Add Person dialogs, compact amount/date presentation, submission and refresh behavior, frontend integration tests. | Complete locally: unit tests and the real Django/Vite Chromium journey cover participant creation and desktop/phone layouts. Browser CI configured; GitHub-hosted execution awaits an authorized push/PR. |
-| 4 | Verify Hamravesh/cloud access from Iran and internal backend connectivity to managed PostgreSQL, add deployment configuration, complete deployment and smoke checks, finalize repository URL and submission instructions. | Planned; no deployment authorized or performed. |
+| 4 | Package production images; later verify Hamravesh/cloud access, managed PostgreSQL connectivity, authorized deployment, and submission. | Production packaging implemented; cloud/deployment work remains pending and unauthorized. |
