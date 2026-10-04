@@ -2,6 +2,7 @@ import re
 from datetime import UTC
 from decimal import Decimal
 
+from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
 from expenses.models import Expense, Participant
@@ -11,6 +12,20 @@ class ParticipantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Participant
         fields = ["id", "name"]
+        read_only_fields = ["id"]
+        extra_kwargs = {"name": {"trim_whitespace": True}}
+
+    def create(self, validated_data):
+        try:
+            with transaction.atomic():
+                return super().create(validated_data)
+        except IntegrityError:
+            # A concurrent request may have claimed the name after validation.
+            if Participant.objects.filter(name=validated_data["name"]).exists():
+                raise serializers.ValidationError(
+                    {"name": ["A person with this name already exists."]}
+                ) from None
+            raise
 
 
 class ExpenseAmountField(serializers.Field):
