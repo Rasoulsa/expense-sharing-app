@@ -153,3 +153,48 @@ jobs:
         run: npm run test
       - name: Build frontend
         run: npm run build
+
+  browser:
+    name: Browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      DEBUG: "false"
+      SECRET_KEY: browser-test-only-public-placeholder-never-use-in-production
+      ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      PYTHON_DOTENV_DISABLED: "1"
+      VITE_API_BASE_URL: http://127.0.0.1:8001
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version-file: backend/.python-version
+      - name: Set up uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.1"
+          working-directory: backend
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Install locked backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Run browser test against Django and Vite
+        run: npm run e2e

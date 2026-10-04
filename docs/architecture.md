@@ -10,12 +10,95 @@ by uv and a React / TypeScript / Vite frontend managed by npm. The browser uses
 the API URL supplied through `VITE_API_BASE_URL`. The local Vite origin is
 `http://localhost:5173`; Django permits exactly that CORS origin during development.
 
+Day 3 slice 1 replaces the participant scaffold with one responsive page using
+Expenses and Balances tabs, with Expenses selected initially. TanStack Query
+loads each view through the typed fetch client, treats results as fresh for 30 seconds,
+and cancels pending requests when leaving a view. Each view has loading, empty,
+error, and explicit retry states. Tabs support arrow keys, Home, and End;
+expense fields use labeled definitions and dates use semantic `time` elements.
+Nested participant details come directly from the API; IDs stay numeric and
+amounts stay decimal strings, displayed with a dollar prefix. No frontend
+balance arithmetic is performed. The participants GET client supplies the
+Add Expense modal. Vitest/React Testing Library tests exercise
+the real client through mocked fetch, without a running backend.
+
+Day 3 slice 2 adds the Add Expense button and a native modal dialog. The browser
+makes the background inert; the modal explicitly wraps Tab/Shift+Tab among
+enabled controls. Opening focuses the
+dialog heading; Escape or Close dismisses it and restores focus to the button.
+Participant options come from the API with loading, error/retry, and insufficient
+participant states. The form validates participant choices, distinctness,
+decimal syntax/range, and a trimmed description of at most 500 Unicode characters.
+It uses a text amount field with decimal input mode, checks the range with exact
+integer cents, and submits numeric participant IDs and the original decimal
+string. Backend field errors remain associated with their inputs; failed POSTs
+preserve all values and allow retry. Pending saves disable editing, dismissal,
+and duplicate submission. Successful saves close the dialog, cancel any reads
+started before the save, invalidate both list queries, and fetch fresh expenses
+and balances, including an unopened view.
+Refresh failures use the existing view error/retry state. Query options live in
+`frontend/src/queries.ts`; the slice 1 query keys remain unchanged.
+
+Day 3 browser validation uses Playwright Chromium against real Vite and Django
+servers. `frontend/playwright.config.ts` starts both without server reuse, using
+`http://localhost:5173` as the exact allowed CORS origin and
+`http://127.0.0.1:8001` as the API URL. The test-only backend launcher creates a
+fresh temporary SQLite database, disables `.env` loading and inherited
+PostgreSQL settings, migrates and seeds, then serves until Playwright shuts it
+down. Shutdown closes database connections and removes the temporary database.
+The single journey verifies fetched participant names, both directions of modal
+focus wrapping and Escape, opposite expenses of `50.00` and `20.00`, the
+resulting `Bob owes Alice $30.00`, and persistence after reload. It additionally
+creates Mina Farah through Add Person, checks that both expense selects refresh,
+and records an Alice-for-Mina `15.00` expense, preserving the independent Bob debt.
+Desktop and 320px phone checks save layout screenshots, including the dialogs.
+The journey also cancels deletion without a DELETE or persisted changes, removes
+the `20.00` reverse expense, and verifies `Bob owes Alice $50.00` after reload.
+Another client's real API deletion produces a deterministic stale-card 404,
+which the browser displays without dismissing the confirmation.
+Requests are
+real and waits observe responses/UI state. Browser specs stay separate from
+Vitest and are included in TypeScript and ESLint checks.
+
+The focused Day 3 improvement adds an optional Add Person native dialog. Opening
+focuses its name input; both dialogs share the same Tab/Shift+Tab wrapping helper.
+Escape and Close restore their trigger focus when idle. Local validation rejects
+blank names and names longer than 100 Unicode characters after trimming. Backend
+field errors are associated with the name input, and failed saves retain its value.
+Pending saves disable editing, dismissal, and repeated submission. Successful
+creation announces the new person, closes the dialog, cancels older participant
+reads, and invalidates/refetches the existing participants query. Expenses still
+submit numeric IDs with decimal string amounts. Refresh failures use the existing
+participant query retry state. The page uses compact green rows with decorative
+initials, description, payer → beneficiary, a prominent amount, and semantic dates;
+each balance remains readable as “X owes Y $Z”.
+
+Single-expense deletion adds a Delete action to each card and a native
+confirmation naming its description and amount. Opening focuses Cancel; Escape
+or Cancel returns focus to that card without changing data. Pending deletion
+disables controls and dismissal and prevents duplicate requests. After a 204,
+older GETs are canceled before the deleted ID is removed from the expenses cache,
+so canceling a later refresh cannot restore the card or allow another DELETE.
+Errors remain in the confirmation with an alert and focus; a 404 explains that the list needs
+reloading. On success, focus moves to the stable Expenses tab, a status message
+announces removal, and both expense/balance queries refresh. Creation and deletion
+share `refreshExpenseViews`, including cancellation of older reads and fetching
+an unopened view. Refreshes run independently of the completed mutation, so slow
+or offline-paused reads cannot keep a successful write pending. All three write
+mutations use `networkMode: 'always'` with `retry: false`: an offline fetch fails
+with an error, releases the controls and Escape, and is not queued for reconnection.
+Read queries retain their online-only behavior. A refresh failure uses the existing
+view retry state after the successful mutation. No optimistic balance arithmetic
+is performed.
+
 Participants are seeded beforehand. `seed_participants` ensures Alice, Bob,
 Charlie, and David exist using `get_or_create`, preserving participant IDs and
 existing expenses. A fresh database still has exactly four participants after
-two runs. There is no login, authentication, registration, or user creation UI.
-All three application endpoints are anonymous; participants and balances reject
-writes, while expenses support listing and creation. CORS is a
+two runs. People added through the API and expenses involving them survive reruns.
+Optional participant creation is a user-requested Day 3 extension to the original
+challenge; no login, authentication, or registration is introduced.
+All three application endpoints are anonymous; participants and expenses support
+listing and creation, while balances reject writes. CORS is a
 browser origin policy and does not turn the public API into an authenticated API.
 
 ## Data and financial semantics
@@ -49,14 +132,21 @@ cents. Chains and cycles are not simplified through a third participant.
 
 | Endpoint | Contract |
 | --- | --- |
-| `GET /api/participants/` | Array of `{id, name}`, ordered by name then ID; writes return 405. |
+| `GET /api/participants/` | Array of `{id, name}`, ordered by name then ID. |
+| `POST /api/participants/` | Accepts `{name}`, trims whitespace, rejects blank, overlong (100 characters), and duplicate names with field-level 400 errors; returns 201 `{id, name}`. IDs are server-owned. PUT, PATCH, and DELETE return 405. |
 | `GET /api/expenses/` | Array ordered by `-created_at`, then `-id`; each expense includes nested payer/beneficiary, a two-decimal amount string, description, and server-owned UTC ISO 8601 timestamp. |
-| `POST /api/expenses/` | Accepts existing, distinct participant IDs, decimal string amount, and description. Returns 201 with the created expense, or 400 with useful field errors. Other write methods return 405. |
+| `POST /api/expenses/` | Accepts existing, distinct participant IDs, decimal string amount, and description. Returns 201 with the created expense, or 400 with useful field errors. Other write methods on the collection return 405. |
+| `DELETE /api/expenses/{id}/` | Removes exactly one expense, returning 204 with an empty body; unknown/already-deleted IDs return 404. Other operation methods on the detail URL return 405. |
 | `GET /api/balances/` | Array of `{debtor, creditor, amount}`, with nested `{id, name}` participants and a positive two-decimal amount string, ordered by debtor ID then creditor ID. All other methods return 405. |
 
 All GET arrays return `[]` when empty. Balance pairs with exact cancellation are
-also omitted. Participants remain read-only; there is no edit, delete, settlement,
-or authentication feature.
+also omitted. Participant creation is optional; expense deletion is limited to
+one ID at a time. There is no editing, bulk deletion, participant deletion,
+balance deletion, settlement, or authentication feature.
+
+Names retain their original spelling and case after trimming. Uniqueness uses the
+existing model's exact name constraint. The serializer also turns a uniqueness
+collision during insertion into a field-level error, without changing the schema.
 
 Expense amounts must be exact decimal strings of ASCII digits with an optional
 decimal point and one or two fractional digits, from `0.01` through `999999.99`.
@@ -154,7 +244,10 @@ and backup/restore verification for managed PostgreSQL.
 ## Checks and CI
 
 `.github/workflows/ci.yml` runs on pull requests and pushes to `main` with
-`Backend checks`, `Frontend checks`, and a separate `PostgreSQL 17 checks` job.
+`Backend checks`, `Frontend checks`, `PostgreSQL 17 checks`, and `Browser tests`.
+The original three job definitions remain unchanged. The independent browser
+job installs both lockfiles and Chromium with Ubuntu system dependencies, then
+runs the real-server journey with public disposable settings and no secrets.
 Python 3.13 and Node 24 are selected from the projects' version files.
 uv installs from `backend/uv.lock` using
 `uv sync --locked`; npm installs from `frontend/package-lock.json` using
@@ -186,5 +279,5 @@ Hamravesh credentials.
 | --- | --- | --- |
 | 1 | Scaffold, Participant and Expense models, migration, idempotent seeds, read-only participants API, health checks, participant page states, focused tests, CI, setup and architecture docs. | Implemented locally; first GitHub-hosted CI execution awaits an authorized push/PR. |
 | 2 | Expense creation/list APIs, input validation, pairwise balance calculation and API, focused financial and API tests. | Implemented locally in slices 1 and 2; CI execution awaits an authorized push/PR. |
-| 3 | One-page Expenses and Balances views, Add Expense modal using seeded participants, amount/date display, submission and refresh behavior, frontend integration tests. | Planned; not implemented. |
+| 3 | One-page Expenses and Balances views, accessible Add Expense and optional Add Person dialogs, compact amount/date presentation, submission and refresh behavior, frontend integration tests. | Complete locally: unit tests and the real Django/Vite Chromium journey cover participant creation and desktop/phone layouts. Browser CI configured; GitHub-hosted execution awaits an authorized push/PR. |
 | 4 | Verify Hamravesh/cloud access from Iran and internal backend connectivity to managed PostgreSQL, add deployment configuration, complete deployment and smoke checks, finalize repository URL and submission instructions. | Planned; no deployment authorized or performed. |

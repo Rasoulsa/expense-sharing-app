@@ -27,9 +27,23 @@ def test_seed_twice_preserves_participants_and_expenses():
 
 
 @pytest.mark.django_db
-def test_seed_keeps_other_existing_participants():
-    existing = Participant.objects.create(name="Eve")
+def test_seed_keeps_api_created_participants_and_their_expenses(client):
     call_command("seed_participants", stdout=StringIO())
-    existing.refresh_from_db()
-    assert existing.name == "Eve"
+    response = client.post(
+        "/api/participants/", data={"name": "Eve"}, content_type="application/json"
+    )
+    assert response.status_code == 201
+    existing = Participant.objects.get(id=response.json()["id"])
+    Expense.objects.create(
+        paid_by=Participant.objects.get(name="Alice"),
+        expense_for=existing,
+        amount_cents=500,
+        description="Coffee",
+    )
+    participants = list(Participant.objects.values())
+    expenses = list(Expense.objects.values())
+    for _ in range(2):
+        call_command("seed_participants", stdout=StringIO())
+        assert list(Participant.objects.values()) == participants
+        assert list(Expense.objects.values()) == expenses
     assert Participant.objects.count() == 5
