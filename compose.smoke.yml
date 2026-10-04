@@ -1,0 +1,44 @@
+# Disposable local verification only. Never point this at Hamravesh.
+name: expense-sharing-smoke
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: expense_smoke
+      POSTGRES_USER: expense_smoke
+      POSTGRES_PASSWORD: disposable-smoke-password
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U expense_smoke -d expense_smoke"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    image: expense-sharing-backend:day4
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://expense_smoke:disposable-smoke-password@db:5432/expense_smoke
+      SECRET_KEY: disposable-smoke-only-public-placeholder-never-use-in-production
+      ALLOWED_HOSTS: localhost,127.0.0.1,backend
+      CORS_ALLOWED_ORIGIN: http://localhost:8080
+      # Local smoke has no TLS ingress; production defaults to true.
+      SECURE_SSL_REDIRECT: "false"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    image: expense-sharing-frontend:day4
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "127.0.0.1:8080:80"
