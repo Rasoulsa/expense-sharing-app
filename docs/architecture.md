@@ -14,7 +14,8 @@ Participants are seeded beforehand. `seed_participants` ensures Alice, Bob,
 Charlie, and David exist using `get_or_create`, preserving participant IDs and
 existing expenses. A fresh database still has exactly four participants after
 two runs. There is no login, authentication, registration, or user creation UI.
-The current participants endpoint is anonymous and rejects writes. CORS is a
+All three application endpoints are anonymous; participants and balances reject
+writes, while expenses support listing and creation. CORS is a
 browser origin policy and does not turn the public API into an authenticated API.
 
 ## Data and financial semantics
@@ -29,12 +30,88 @@ money. Descriptions are bounded to 500 characters. Foreign keys protect
 participants referenced by expenses from deletion. Creation timestamps are
 generated on the backend and stored/read with timezone support in UTC.
 
-The planned balance calculation nets expenses within each unordered pair of
+The balance service, `backend/expenses/services.py::calculate_balances`, reads
+persisted expenses on each query and accumulates signed integer cents keyed by
+the lower and higher participant IDs. A payment by the lower ID adds cents;
+a payment by the higher ID subtracts cents. The sign selects the creditor and
+debtor, and the absolute value gives the positive debt. It creates no balance
+records and does not change expenses or cache results between requests.
+
+The calculation nets repeated and reverse expenses within each unordered pair of
 participants. If Alice pays 5,000 cents for Bob and Bob pays 2,000 cents for
 Alice, Bob owes Alice 3,000 cents. A zero net pair is omitted. Debts involving
 a third participant remain separate; there is no global debt optimization or
-automatic transfer of debts across people. This calculation is planned for
-Day 2 and is not implemented in Day 1.
+automatic transfer of debts across people. For example, if Bob also pays 2,500
+cents for Charlie, Charlie owes Bob 2,500 cents while Bob still owes Alice 3,000
+cents. Chains and cycles are not simplified through a third participant.
+
+## Application API
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/participants/` | Array of `{id, name}`, ordered by name then ID; writes return 405. |
+| `GET /api/expenses/` | Array ordered by `-created_at`, then `-id`; each expense includes nested payer/beneficiary, a two-decimal amount string, description, and server-owned UTC ISO 8601 timestamp. |
+| `POST /api/expenses/` | Accepts existing, distinct participant IDs, decimal string amount, and description. Returns 201 with the created expense, or 400 with useful field errors. Other write methods return 405. |
+| `GET /api/balances/` | Array of `{debtor, creditor, amount}`, with nested `{id, name}` participants and a positive two-decimal amount string, ordered by debtor ID then creditor ID. All other methods return 405. |
+
+All GET arrays return `[]` when empty. Balance pairs with exact cancellation are
+also omitted. Participants remain read-only; there is no edit, delete, settlement,
+or authentication feature.
+
+Expense amounts must be exact decimal strings of ASCII digits with an optional
+decimal point and one or two fractional digits, from `0.01` through `999999.99`.
+Whole-number strings such as `"1"` and one-place strings such as `"1.2"` are
+accepted and returned as `"1.00"` and `"1.20"`. Numeric JSON values, exponent
+notation, signs, zero, negative values, whitespace, and excessive precision are
+rejected. The serializer uses `Decimal` for conversion to integer cents and for
+response formatting; balance arithmetic uses integers. A balance can exceed the
+per-expense input cap. API descriptions are trimmed, required, nonempty, and
+bounded by the model's 500-character limit after trimming. The expense's `id` and
+`created_at` are read-only; timestamps are generated on the server and returned in UTC even
+if another timezone is active.
+
+Example `GET /api/participants/` response (IDs depend on the database):
+
+```json
+[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
+```
+
+Example `POST /api/expenses/` request:
+
+```json
+{
+  "paid_by": 1,
+  "expense_for": 2,
+  "amount": "50.00",
+  "description": "Lunch"
+}
+```
+
+Example 201 response; `GET /api/expenses/` wraps expense objects in an array:
+
+```json
+{
+  "id": 1,
+  "paid_by": {"id": 1, "name": "Alice"},
+  "expense_for": {"id": 2, "name": "Bob"},
+  "amount": "50.00",
+  "description": "Lunch",
+  "created_at": "2026-10-04T10:00:00Z"
+}
+```
+
+Example `GET /api/balances/` response after that expense and a reverse `20.00`
+payment from Bob for Alice:
+
+```json
+[
+  {
+    "debtor": {"id": 2, "name": "Bob"},
+    "creditor": {"id": 1, "name": "Alice"},
+    "amount": "30.00"
+  }
+]
+```
 
 ## Storage and Hamravesh decision
 
@@ -108,6 +185,6 @@ Hamravesh credentials.
 | Day | Scope | Status |
 | --- | --- | --- |
 | 1 | Scaffold, Participant and Expense models, migration, idempotent seeds, read-only participants API, health checks, participant page states, focused tests, CI, setup and architecture docs. | Implemented locally; first GitHub-hosted CI execution awaits an authorized push/PR. |
-| 2 | Expense creation/list APIs, input validation, pairwise balance calculation and API, focused financial and API tests. | Planned; not implemented. |
+| 2 | Expense creation/list APIs, input validation, pairwise balance calculation and API, focused financial and API tests. | Implemented locally in slices 1 and 2; CI execution awaits an authorized push/PR. |
 | 3 | One-page Expenses and Balances views, Add Expense modal using seeded participants, amount/date display, submission and refresh behavior, frontend integration tests. | Planned; not implemented. |
 | 4 | Verify Hamravesh/cloud access from Iran and internal backend connectivity to managed PostgreSQL, add deployment configuration, complete deployment and smoke checks, finalize repository URL and submission instructions. | Planned; no deployment authorized or performed. |
