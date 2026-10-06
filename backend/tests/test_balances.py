@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 from django.test import Client
 
-from expenses.models import Expense, Participant
+from expenses.models import Expense, Occasion, Participant
 from expenses.services import calculate_balances
 
 pytestmark = pytest.mark.django_db
@@ -87,6 +87,41 @@ def test_pairwise_balances(client, participants, payments, debts):
     assert response.json() == expected_rows(participants, debts)
 
 
+def test_balances_are_global_by_default_and_recomputed_for_each_occasion(client, participants):
+    dinner = Occasion.objects.create(name="Dinner")
+    trip = Occasion.objects.create(name="Trip")
+    for payer, beneficiary, cents, occasion in [
+        (0, 1, 5000, dinner),
+        (1, 0, 2000, trip),
+        (1, 0, 500, None),
+        (1, 2, 2500, trip),
+        (2, 0, 1000, dinner),
+    ]:
+        Expense.objects.create(
+            paid_by=participants[payer],
+            expense_for=participants[beneficiary],
+            amount_cents=cents,
+            occasion=occasion,
+        )
+    before = list(Expense.objects.values())
+    expected = expected_rows(participants, [(0, 2, "10.00"), (1, 0, "25.00"), (2, 1, "25.00")])
+    # A chain and cycle still keep separate pair debts, even across different occasions.
+    assert client.get("/api/balances/").json() == expected
+    for occasion, debts in [
+        (dinner, [(0, 2, "10.00"), (1, 0, "50.00")]),
+        (trip, [(0, 1, "20.00"), (2, 1, "25.00")]),
+    ]:
+        assert client.get("/api/expenses/", {"occasion": occasion.id}).status_code == 200
+        assert client.get("/api/balances/", {"occasion": occasion.id}).json() == expected_rows(
+            participants, debts
+        )
+    empty = Occasion.objects.create(name="Empty")
+    assert client.get("/api/balances/", {"occasion": empty.id}).json() == []
+    assert client.get("/api/balances/", {"occasion": 999999}).json() == []
+    assert client.get("/api/balances/").json() == expected
+    assert list(Expense.objects.values()) == before
+
+
 @pytest.mark.parametrize("seeded", [False, True])
 def test_empty_balances_are_anonymous(client, seeded):
     if seeded:
@@ -146,3 +181,65 @@ def test_requery_preserves_expenses_and_reads_new_persisted_payments(participant
     assert response.json() == expected_rows(participants, [(1, 0, "30.00")])
     assert Expense.objects.count() == 2
     assert Expense.objects.filter(id=created.json()["id"]).values().get() == before[0]
+
+
+@pytest.mark.parametrize(
+    "occasion_id",
+    ["", "0", "-1", "1.0", "1e0", "true", "null", " 1 ", "1\n", "١", str(2**63), "9" * 100],
+)
+def test_balance_filter_validation_matches_expense_filter(client, participants, occasion_id):
+    Expense.objects.create(paid_by=participants[0], expense_for=participants[1], amount_cents=100)
+    before = list(Expense.objects.values())
+    balances = client.get("/api/balances/", {"occasion": occasion_id})
+    expenses = client.get("/api/expenses/", {"occasion": occasion_id})
+    assert balances.status_code == expenses.status_code == 400
+    assert balances.json() == expenses.json()
+    assert set(balances.json()) == {"occasion"}
+    assert list(Expense.objects.values()) == before
+
+
+def test_filtered_balances_keep_pairs_that_cancel_globally_and_refresh_after_deletion(
+    client, participants
+):
+    birthday = Occasion.objects.create(name="Birthday")
+    trip = Occasion.objects.create(name="Trip")
+    forward = Expense.objects.create(
+        paid_by=participants[0], expense_for=participants[1], amount_cents=5000, occasion=birthday
+    )
+    Expense.objects.create(
+        paid_by=participants[1], expense_for=participants[0], amount_cents=5000, occasion=trip
+    )
+    assert client.get("/api/balances/").json() == []
+    assert client.get("/api/balances/", {"occasion": birthday.id}).json() == expected_rows(
+        participants, [(1, 0, "50.00")]
+    )
+    assert client.get("/api/balances/", {"occasion": trip.id}).json() == expected_rows(
+        participants, [(0, 1, "50.00")]
+    )
+    assert calculate_balances(occasion_id=birthday.id)[0]["amount_cents"] == 5000
+    assert client.delete(f"/api/expenses/{forward.id}/").status_code == 204
+    assert client.get("/api/balances/", {"occasion": birthday.id}).json() == []
+    assert (
+        client.get("/api/balances/").json()
+        == client.get("/api/balances/", {"occasion": trip.id}).json()
+    )
+
+
+def test_ungrouped_expense_cancels_global_pair_but_not_occasion_pair(client):
+    alice = Participant.objects.create(name="Alice")
+    charlie = Participant.objects.create(name="Charlie")
+    birthday = Occasion.objects.create(name="Birthday")
+    Expense.objects.create(paid_by=charlie, expense_for=alice, amount_cents=5000, occasion=birthday)
+    historical = Expense.objects.create(paid_by=alice, expense_for=charlie, amount_cents=5000)
+
+    assert client.get("/api/balances/").json() == []
+    assert client.get("/api/balances/", {"occasion": birthday.id}).json() == [
+        {
+            "debtor": {"id": alice.id, "name": "Alice"},
+            "creditor": {"id": charlie.id, "name": "Charlie"},
+            "amount": "50.00",
+        }
+    ]
+    historical.refresh_from_db()
+    assert historical.occasion_id is None
+    assert Expense.objects.count() == 2

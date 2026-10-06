@@ -6,12 +6,13 @@ import type { Expense } from './api'
 
 const alice = { id: 17, name: 'Alice' }
 const bob = { id: 93, name: 'Bob' }
+const dinner = { id: 55, name: 'Dinner' }
 const forward: Expense = {
-  id: 81, paid_by: alice, expense_for: bob, amount: '50.00',
+  id: 81, paid_by: alice, expense_for: bob, occasion: null, amount: '50.00',
   description: 'Shared lunch', created_at: '2026-10-04T10:00:00Z',
 }
 const reverse: Expense = {
-  id: 82, paid_by: bob, expense_for: alice, amount: '20.00',
+  id: 82, paid_by: bob, expense_for: alice, occasion: dinner, amount: '20.00',
   description: 'Return payment', created_at: '2026-10-04T11:00:00Z',
 }
 const initialExpenses = [reverse, forward]
@@ -66,7 +67,12 @@ beforeEach(() => {
     if (path === '/api/balances/' && !options?.method) return balancesResponse()
     throw new Error(`Unexpected request: ${options?.method ?? 'GET'} ${path}`)
   })
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', async (input: RequestInfo | URL, options?: RequestInit) => {
+    const url = new URL(String(input))
+    if (url.pathname === '/api/occasions/') return json([dinner])
+    const response = await fetchMock(input, options)
+    return response
+  })
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
     configurable: true, value: function (this: HTMLDialogElement) { this.open = true },
   })
@@ -219,6 +225,55 @@ it('shows empty expenses and balances after deleting the last expense', async ()
   expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Expenses' }))
   fireEvent.click(screen.getByRole('tab', { name: 'Balances' }))
   expect(await screen.findByText('No outstanding balances.')).toBeTruthy()
+})
+
+it('removes a deleted expense from filtered and unfiltered caches and refreshes global and inactive filtered balances', async () => {
+  let deleted = false
+  fetchMock.mockImplementation((input, options) => {
+    const url = new URL(String(input))
+    if (options?.method === 'DELETE') {
+      deleted = true
+      return Promise.resolve(new Response(null, { status: 204 }))
+    }
+    if (url.pathname === '/api/balances/') {
+      const filtered = url.searchParams.has('occasion')
+      return Promise.resolve(json(filtered
+        ? (deleted ? [] : [{ debtor: alice, creditor: bob, amount: '20.00' }])
+        : [{ debtor: bob, creditor: alice, amount: deleted ? '50.00' : '30.00' }]))
+    }
+    const rows = deleted ? [forward] : initialExpenses
+    return Promise.resolve(json(url.search ? rows.filter((expense) => expense.occasion?.id === dinner.id) : rows))
+  })
+  const client = renderApp()
+  fireEvent.click(await screen.findByRole('button', { name: 'Show expenses for Dinner' }))
+  await screen.findByRole('heading', { name: 'Return payment' })
+  fireEvent.click(screen.getByRole('tab', { name: 'Balances' }))
+  await screen.findByRole('list', { name: 'Balances' })
+  const select = screen.getByRole('combobox', { name: 'Filter balances by occasion' })
+  await within(select).findByRole('option', { name: 'Dinner' })
+  fireEvent.change(select, { target: { value: '55' } })
+  expect((await screen.findByRole('list', { name: 'Balances' })).textContent).toBe('Alice owes Bob $20.00')
+  fireEvent.click(screen.getByRole('tab', { name: 'Expenses' }))
+  openConfirmation()
+  confirm()
+  await screen.findByText('No expenses for Dinner.')
+  await waitFor(() => {
+    expect(client.getQueryData(['expenses'])).toEqual([forward])
+    expect(client.getQueryData(['expenses', { occasion: 55 }])).toEqual([])
+    expect(client.getQueryData(['balances', { occasion: 55 }])).toEqual([])
+    expect(client.getQueryData(['balances'])).toEqual([{ debtor: bob, creditor: alice, amount: '50.00' }])
+  })
+  expect(screen.queryByRole('button', { name: 'Delete expense: Return payment ($20.00)' })).toBeNull()
+  expect(document.activeElement).toBe(screen.getByRole('tab', { name: 'Expenses' }))
+  fireEvent.click(screen.getByRole('tab', { name: 'Balances' }))
+  await screen.findByText('No outstanding balances for Dinner.')
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+  expect((await screen.findByRole('list', { name: 'Balances' })).textContent).toBe('Bob owes Alice $50.00')
+  fireEvent.click(screen.getByRole('tab', { name: 'Expenses' }))
+  expect(screen.getByText('No expenses for Dinner.')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+  expect(await screen.findByRole('heading', { name: 'Shared lunch' })).toBeTruthy()
+  expect(screen.queryByRole('heading', { name: 'Return payment' })).toBeNull()
 })
 
 it('keeps the deleted card absent after a slow refresh is canceled by switching views', async () => {

@@ -3,8 +3,9 @@
 The authoritative interview requirements are in [docs/challenge-spec.md](docs/challenge-spec.md).
 Design decisions and the implementation plan are in [docs/architecture.md](docs/architecture.md).
 An expense is directional: the beneficiary owes the payer. Balances are netted
-between each pair of people. Participants are seeded beforehand; an optional
-Add Person flow can extend the list without changing those seeds.
+between each pair of people, globally by default or within a selected occasion.
+Participants are seeded and read-only. Add Occasion organizes expenses; occasion
+selection is optional. Historical expenses without an occasion remain visible.
 
 ## Stack
 
@@ -78,7 +79,7 @@ host and database name. Keep `DATABASE_URL` unset in your existing local `.env`.
 
 ### Hamravesh production database
 
-Production uses the healthy managed PostgreSQL 17 resource `expense-db` in
+The recorded production database is the managed PostgreSQL 17 resource `expense-db` in
 cluster `hamravesh-c11`, namespace `saeidirasoul-expense-sharing`. The resource
 name is **expense-db**, but the connection panel's database name is **postgres**.
 The connection is internal to the cluster. Configure `DATABASE_URL` privately
@@ -96,20 +97,16 @@ credentials out of tracked files, command output, and CI. Set production
 `SECRET_KEY`, `DEBUG=false`, and `ALLOWED_HOSTS` privately as described above.
 No Mac-to-Hamravesh connection or public database access is needed.
 
-At deployment time, run these from the **backend inside Hamravesh**, with its
-environment already configured, before serving traffic:
-
-```sh
-python manage.py check --deploy
-python manage.py migrate --noinput
-python manage.py seed_participants
-```
-
-These commands target the production image, whose PATH contains its locked
-Python environment. The seed command is safe to rerun. Production operations
-have not been performed. See [production packaging](docs/production-packaging.md)
-for required runtime settings, ingress verification, root-context image builds,
-and a disposable local PostgreSQL container smoke setup.
+For the existing backend/frontend apps, follow the [release runbook](docs/operations.md).
+Migrations `expenses.0002_occasions`, `expenses.0003_occasion_case_insensitive_names`
+(if pending), and `expenses.0004_occasion_canonical_names` must run from the **new backend image/code**
+with private runtime settings while the current app remains available, before
+promoting the new backend: readiness requires the occasion table, its 0004
+canonical-name column, and the expense foreign-key column. Promote the frontend after backend health/API checks.
+The exact Hamravesh mechanism for executing the candidate migration must be
+verified; no provider one-off job feature is assumed. This branch has not run a
+production migration or deployment. [Production packaging](docs/production-packaging.md)
+describes runtime settings, ingress checks, image builds, and disposable smoke tests.
 
 ### Frontend
 
@@ -154,7 +151,7 @@ npm ci
 npm run lint
 npm run typecheck
 npm run test
-npm run build
+VITE_API_BASE_URL=http://localhost:8000 npm run build
 ```
 
 With `DATABASE_URL` unset, backend tests use pytest-django's isolated in-memory
@@ -191,20 +188,18 @@ It disables `.env` loading, removes inherited `DATABASE_URL`, overrides
 `SQLITE_PATH`, and uses an explicit public test key with `DEBUG=false`.
 The test uses neither mocked HTTP responses nor production data or credentials.
 
-The Chromium journey checks fetched participant options, initial modal focus,
-Tab/Shift+Tab containment, Escape and focus restoration, an Alice-for-Bob
-`50.00` expense, a Bob-for-Alice `20.00` expense, the resulting
-`Bob owes Alice $30.00` balance, and persistence after reload. It also creates
-Mina Farah through Add Person, verifies the refreshed expense dropdowns, records
-an Alice-for-Mina `15.00` expense, and confirms that independent debt persists.
-Add Person and Add Expense receive keyboard/focus checks. The journey checks 320px phone
-layouts and saves desktop/phone screenshots for Expenses, Balances, and dialogs.
-Participants are selected by their fetched names; waits use API responses and visible UI states.
-It then cancels a deletion without sending a DELETE or changing persisted data,
-deletes the `20.00` reverse expense, and verifies that Bob now owes Alice `50.00`
-after reload. A separate real API deletion simulates another client removing a
-displayed expense; the browser shows its 404 error and keeps the confirmation open.
-`npm run test` remains the separate Vitest unit suite.
+The real Chromium journey verifies read-only seeded participants and the absence
+of participant creation controls, Add Occasion (trimmed names, duplicate field
+errors for case variants, and Cancel/Escape after network failures), and optional
+occasion selection in Add Expense, including failed occasion lookups. It creates
+assigned and ungrouped expenses and checks independent filtering/clearing across tabs,
+persistence, and global versus occasion-scoped pairwise balances.
+Keyboard/focus checks and desktop/320px screenshots cover both forms, views, and
+filters, including scrolling to Save Expense on a phone. It also checks canceled
+and confirmed individual deletion, refreshed filtered/unfiltered lists and
+global/filtered balances, and another client's deletion producing a recoverable real 404.
+Participants are selected by fetched names; waits observe API responses and UI
+states. `npm run test` remains the separate Vitest unit suite.
 
 Browser reports, layout screenshots, and failure traces are ignored under
 `frontend/playwright-report/` and `frontend/test-results/`. To view the last
@@ -255,11 +250,32 @@ settings and real public URLs remain pending verification.
 `Participant.name` is unique and limited to 100 characters; empty and
 whitespace-only names fail model validation. The database also rejects empty
 and space-only names. `Expense` stores a payer and beneficiary, a positive
-integer amount in cents, a description of at most 500 characters, and a
-server-generated UTC creation timestamp. The model permits empty descriptions;
+integer amount in cents, a description of at most 500 characters, a nullable
+protected occasion reference, and a server-generated UTC creation timestamp.
+The model permits empty descriptions;
 the expense API requires a nonempty description after trimming. Database constraints
 reject nonpositive amounts, identical payer/beneficiary pairs, and oversized
 descriptions. Participant deletion is protected when an expense references it.
+
+`Occasion.name` is limited to 100 characters; its trimmed spelling is retained
+for display. One shared function trims names, normalizes Unicode to NFC, applies
+casefolding, and normalizes to NFC again. Birthday / " birthday ", Été / été /
+Été (decomposed accents), and Straße / STRASSE conflict; accents remain meaningful.
+The resulting stored `canonical_name` is nonblank, non-null, and protected by a
+database unique constraint in PostgreSQL and SQLite. API duplicate validation and
+model writes use the same function, and insertion races return HTTP 400 `name`
+errors. The key is internal and never appears in API responses. Occasions are
+ordered by display name then ID.
+
+Migration `0002_occasions` adds the model and nullable protected expense reference,
+leaving old participants/expenses intact and old expenses ungrouped. Applied
+migrations 0002 and 0003 are unchanged. New migration `0004_occasion_canonical_names`
+checks every existing name before altering/backfilling, reports conflicting IDs
+and spellings, then backfills keys without changing display names or expense
+associations. It replaces the inadequate database `LOWER(TRIM(name))` index with
+the canonical-key constraint. Conflicts require explicitly reviewed renames and
+a retry; no rows are deleted or silently merged. There is no occasion editing
+or deletion API.
 
 `seed_participants` creates Alice, Bob, Charlie, and David. It is safe to rerun:
 on a fresh database, running twice leaves exactly four participants. It keeps
@@ -268,13 +284,17 @@ existing participants and expenses intact and does not create expenses.
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /api/participants/` | Anonymous JSON array of `{id, name}`, ordered by name then id; empty tables return `[]`. |
-| `POST /api/participants/` | Accepts `{name}`, trims whitespace, and returns `{id, name}` with 201. Blank, overlong (100 characters), and duplicate names return 400 with `name` errors. PUT, PATCH, and DELETE return 405. |
+| `POST`, `PUT`, `PATCH`, `DELETE /api/participants/` | Read-only participants: all return 405 and preserve existing people/expenses. |
+| `GET /api/occasions/` | Anonymous array of `{id, name}`, ordered by name then ID. |
+| `POST /api/occasions/` | Accepts `{name}`, trims it, returns 201 `{id, name}`; missing, blank, overlong, or case-insensitive duplicate names return 400 with `name` errors. PUT, PATCH, DELETE return 405. |
 | `GET /api/expenses/` | Anonymous array of expenses, ordered by descending `created_at`, then descending `id`; returns `[]` when empty. |
-| `POST /api/expenses/` | Anonymous creation using participant IDs, a decimal string amount, and description; returns the created expense with 201. Invalid fields return 400 with field errors. PUT, PATCH, and DELETE on this collection return 405. |
+| `GET /api/expenses/?occasion=<id>` | Filters by positive integer occasion ID with the same ordering; unknown IDs return `[]`, malformed IDs return field-level 400 errors. |
+| `POST /api/expenses/` | Anonymous creation using participant IDs, an optional existing occasion ID (or null), a decimal string amount, and description; returns the created expense with 201. Invalid fields return 400 with field errors. PUT, PATCH, and DELETE on this collection return 405. |
 | `DELETE /api/expenses/{id}/` | Anonymous deletion of exactly one expense; returns 204 with no body, or 404 for an unknown/already-deleted ID. Other operation methods on this detail URL return 405. |
-| `GET /api/balances/` | Anonymous array of pairwise debts, ordered by debtor ID then creditor ID; returns `[]` when empty or all pairs cancel. All other methods return 405. |
+| `GET /api/balances/` | Anonymous array of global pairwise debts across all occasions and ungrouped expenses, ordered by debtor ID then creditor ID; returns `[]` when empty or all pairs cancel. All other methods return 405. |
+| `GET /api/balances/?occasion=<id>` | Recomputes pairwise debts using only that occasion’s expenses, before netting. Positive integer validation matches Expenses; unknown/empty occasions return `[]`. |
 | `GET /health/live/` | Process liveness, returns `{"status":"alive"}` without database access. |
-| `GET /health/ready/` | Checks database access and the participant table; returns `{"status":"ready"}`, or 503 with `{"status":"not_ready"}` when unavailable. An empty usable table is ready. |
+| `GET /health/ready/` | Checks database access, participant/occasion tables, the expense occasion column (0002), and the occasion canonical-name column (0004); returns `{"status":"ready"}`, or 503 with `{"status":"not_ready"}` when unavailable. An empty usable table is ready. |
 
 ### Request and response examples
 
@@ -284,18 +304,29 @@ existing participants and expenses intact and does not create expenses.
 [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
 ```
 
-Use IDs returned by that endpoint. `POST /api/expenses/` accepts:
+Use returned IDs. Create an occasion with `POST /api/occasions/`:
+
+```json
+{"name": "Dinner"}
+```
+
+A 201 response is, for example, `{"id": 9, "name": "Dinner"}`.
+`POST /api/expenses/` accepts:
 
 ```json
 {
   "paid_by": 1,
   "expense_for": 2,
+  "occasion": 9,
   "amount": "50.00",
   "description": "Lunch"
 }
 ```
 
-Both participants must exist and be distinct. Amounts must be strings of ASCII
+Both participants must exist and be distinct. The frontend optionally accepts an
+existing occasion; selecting No occasion omits the field and creates an ungrouped expense.
+The backend also accepts omission or explicit null from older clients. A supplied
+occasion must be an existing positive JSON integer ID. Amounts must be strings of ASCII
 digits, optionally followed by a decimal point and one or two digits, with a
 value from `0.01` through `999999.99`. For example, `"1"`, `"1.2"`, and `"1.23"`
 are accepted. Numeric JSON amounts, exponent notation, signs, zero, negative
@@ -305,7 +336,8 @@ Descriptions are required, trimmed, nonempty, and at most 500 characters after
 trimming. The expense's `id` and `created_at` are server-owned.
 
 The 201 response is an expense object; `GET /api/expenses/` returns an array of
-these objects. Participant details are nested, amounts always have two decimal
+these objects. Historical/ungrouped objects include `"occasion": null`.
+Participant and assigned occasion details are nested, amounts always have two decimal
 places, and timestamps use UTC ISO 8601:
 
 ```json
@@ -313,6 +345,7 @@ places, and timestamps use UTC ISO 8601:
   "id": 1,
   "paid_by": {"id": 1, "name": "Alice"},
   "expense_for": {"id": 2, "name": "Bob"},
+  "occasion": {"id": 9, "name": "Dinner"},
   "amount": "50.00",
   "description": "Lunch",
   "created_at": "2026-10-04T10:00:00Z"
@@ -338,13 +371,21 @@ no bulk deletion, participant deletion, or balance deletion.
 
 ### Pairwise calculation
 
-Every balance query derives debts from persisted expenses using integer cents;
-there are no separate balance records. Repeated payments add within an unordered
+Without a filter, `GET /api/balances/` remains the global pairwise net across all
+persisted expenses, including ungrouped history. The Balances view shows exactly
+one list. All occasions uses this global response; opposing expenses across
+occasions can cancel to an empty list, displayed as settled. Selecting a named
+occasion uses `GET /api/balances/?occasion=<id>`: the backend selects that occasion’s
+expenses **before** netting by pair, using integer cents; it never filters already
+netted global debts. There are no separate balance records. Repeated payments add within an unordered
 participant pair, and reverse payments subtract. If Alice pays `50.00` for Bob
 and Bob pays `20.00` for Alice, Bob owes Alice `30.00`. If reverse payments exceed
 the original payments, the debtor and creditor switch. Exact zero pairs are
 omitted; all returned amounts are positive strings with two decimal places.
-Totals may exceed the per-expense input cap.
+Totals may exceed the per-expense input cap. If the 50.00 payment is for Birthday
+and the 20.00 reverse payment is for Trip, Birthday shows Bob owing Alice 50.00,
+Trip shows Alice owing Bob 20.00, and the global overall balance is Bob owing
+Alice 30.00. Each view shows only the selected scope.
 
 Pairs remain independent. If Bob also pays `25.00` for Charlie, Charlie owes Bob
 `25.00`; it does not change Bob's debt to Alice or create a Charlie-to-Alice debt.
@@ -354,19 +395,33 @@ Local URLs:
 
 - Frontend: `http://localhost:5173/`
 - Participants: `http://localhost:8000/api/participants/`
+- Occasions: `http://localhost:8000/api/occasions/`
 - Expenses: `http://localhost:8000/api/expenses/`
 - Balances: `http://localhost:8000/api/balances/`
 - Liveness: `http://localhost:8000/health/live/`
 - Readiness: `http://localhost:8000/health/ready/`
 
-With both local servers running, open the frontend to see the Expenses view,
-then switch to Balances. A newly seeded database shows empty states until an
-expense is recorded. Use Add Expense to select the payer and beneficiary from
-the API, enter a positive USD amount and description, and save. Successful saves
-refresh both views; failed saves keep the form values and display errors.
-Optionally use Add Person to add a unique display name. On success, it refreshes
-participants so the person appears in both Add Expense dropdowns. Seed reruns
-preserve people created through this API and all expenses involving them.
+With both local servers running, open Expenses or switch to Balances. A fresh
+seeded database has no occasions or expenses. Add Expense works immediately:
+choose payer and beneficiary, enter amount and description, and optionally choose
+an occasion. No occasion omits that field from the POST payload, even when the
+occasion lookup is empty or fails. Paid by, Expense for, Amount, and Description
+have visible red asterisks and accessible required state; Occasion is optional.
+Existing participants, including extra people already in a database, remain
+selectable. Add Occasion uses a required trimmed, case-insensitively unique name;
+success refreshes the list and makes the new occasion selectable. Failed writes
+retain values and permit retry or Close/Escape after settling; Add Occasion also
+provides Cancel.
+Select an expense’s occasion-name button to filter Expenses. Expenses and Balances
+have independent selections, both starting at All occasions. Balances has a labeled
+selector for available occasions and shows one balance list: All occasions nets
+all assigned and ungrouped expenses by participant pair, while a named occasion
+shows only that occasion’s net. An empty global result means all pairs are settled,
+including when opposite expenses cancel across occasions. Switching tabs retains
+each tab’s own selection without copying it. Clear filter changes only that tab:
+in Expenses it restores historical ungrouped entries; in Balances it restores the
+global net. Saving or deleting an expense refreshes global and cached filtered
+balances and expense lists.
 Each expense card has a Delete action. Its confirmation names the description
 and amount and initially focuses Cancel. Cancel/Escape leave the data unchanged
 and restore the card button's focus. While deleting, controls are disabled to
@@ -378,45 +433,21 @@ and `curl --fail http://localhost:8000/health/ready/`.
 
 ## Implemented scope and remaining work
 
-Prompt 2 adds the Participant and Expense models, initial migration, participant
-seed command, read-only participants API, and health checks. The frontend
-fetches participant names and shows loading, empty, error, and retry states.
-Prompt 3 adds CI and completes setup and architecture documentation.
-Day 2 adds the expense list/create API, validation, a service deriving pairwise
-balances from persisted expenses, the balances API, and focused financial/API tests.
-Day 3 slice 1 replaces the participant scaffold with responsive Expenses and
-Balances views using TanStack Query and the existing API contract. Expenses is
-selected initially; both views have loading, empty, error, and retry states.
-Keyboard tabs and semantic lists expose the returned expense fields and pairwise
-debts. Focused frontend tests use the real fetch client with mocked HTTP responses.
-Day 3 slice 2 adds the accessible Add Expense modal with API-supplied participant
-options, local validation, backend field errors, preserved values on failure,
-duplicate-submit protection, and refreshes of both views after a successful save.
-The dialog supports initial focus, Escape and Close when idle, and focus returning
-to Add Expense. Interaction tests cover these flows through mocked fetch.
-Day 3 is complete locally with a real Django/Vite Chromium journey. Browser
-testing exposed a focus-wrap gap, now fixed with explicit Tab/Shift+Tab wrapping
-among enabled modal controls. The journey verifies API persistence and pairwise
-netting after reload. A separate browser CI job is configured for PRs and pushes
-to `main`; GitHub-hosted execution still awaits an authorized push/PR.
-The focused Day 3 improvement adds optional participant creation with name
-validation, backend field errors, saving protection, and an accessible Add Person
-dialog. Compact green layouts present expense descriptions, payer → beneficiary,
-amounts, and dates, with readable pairwise balance rows and decorative initials.
-Frontend/backend tests cover creation and preservation by seeds; the real browser
-journey includes a new person, their expense, and desktop/narrow phone layouts.
-Single-expense deletion extends this Day 3 scope with a confirmation, empty-body
-DELETE handling, refreshed expenses/balances, and focused API/UI/browser tests.
-The browser journey covers cancellation, deletion, a real unknown-ID error, and
-the change from `Bob owes Alice $30.00` to `$50.00` after removing the reverse expense.
+The backend provides seeded read-only participants, occasion creation/listing,
+expense creation/listing/filtering, confirmed individual deletion, global and
+occasion-scoped pairwise balances, and
+separate liveness/readiness checks. The additive migration preserves
+old data and the API's optional occasion supports old expense clients during rollout.
+The frontend provides responsive Expenses/Balances tabs, accessible Add Occasion
+and Add Expense dialogs, optional occasion selection, filtering/clearing, and
+query refreshes that preserve offline mutation behavior. Tests cover API/model
+validation, migration preservation, financial semantics, keyboard/focus behavior,
+and the real browser journey at desktop and 320px widths.
 
-| Day | Planned work |
-| --- | --- |
-| 4 | Verify Hamravesh/cloud access and backend access to managed PostgreSQL, add deployment configuration, deploy when authorized, smoke test and finalize submission. |
-
-Day 4 production packaging adds backend Gunicorn and frontend Nginx images,
-strict container settings, and a disposable local PostgreSQL 17 smoke setup.
-See [production packaging](docs/production-packaging.md) for build and release
-commands and the required HTTPS ingress verification. Production storage is managed
-PostgreSQL 17; deployment and production connectivity checks remain pending. See the
-[storage decision](docs/architecture.md#storage-and-hamravesh-decision).
+Gunicorn/Nginx images, strict production settings, PostgreSQL 17 CI, and a
+disposable local container smoke are available. Before any authorized release,
+verify the existing Hamravesh apps, candidate migration command mechanism,
+backup restoration, health/routing, and actual frontend/API origins. Follow
+[operations](docs/operations.md) for release-branch promotion, applying migration
+pending 0002–0004 before backend promotion, frontend acceptance, and rollback without reversing
+the additive schema. No production operation has been run for this change.

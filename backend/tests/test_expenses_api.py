@@ -5,7 +5,7 @@ import pytest
 from django.test import Client
 from django.utils import timezone
 
-from expenses.models import Expense, Participant
+from expenses.models import Expense, Occasion, Participant
 
 pytestmark = pytest.mark.django_db
 
@@ -57,6 +57,7 @@ def test_anonymous_creation_and_listing(expense_payload):
             "id": expense.id,
             "paid_by": {"id": expense_payload["paid_by"], "name": "Alice"},
             "expense_for": {"id": expense_payload["expense_for"], "name": "Bob"},
+            "occasion": None,
             "amount": "12.34",
             "description": "Lunch",
             "created_at": response.json()["created_at"],
@@ -82,6 +83,83 @@ def test_list_orders_by_descending_timestamp_then_id(client, expense_payload):
         response = client.get("/api/expenses/")
         assert response.status_code == 200
         assert [item["id"] for item in response.json()] == [ids[1], ids[0], ids[2]]
+
+
+def test_expense_creation_with_existing_occasion_returns_nested_occasion(client, expense_payload):
+    occasion = Occasion.objects.create(name="Dinner")
+    response = post_expense(client, {**expense_payload, "occasion": occasion.id})
+    assert response.status_code == 201
+    assert response.json()["occasion"] == {"id": occasion.id, "name": "Dinner"}
+    assert Expense.objects.get().occasion_id == occasion.id
+    assert client.get("/api/expenses/").json() == [response.json()]
+
+
+def test_expense_creation_with_explicit_null_occasion_is_ungrouped(client, expense_payload):
+    response = post_expense(client, {**expense_payload, "occasion": None})
+    assert response.status_code == 201
+    assert response.json()["occasion"] is None
+    assert Expense.objects.get().occasion_id is None
+
+
+@pytest.mark.parametrize(
+    "occasion_id",
+    [999999, 0, -1, 2**63, 10**100, True, False, 1.0, 1.9, "1", "1.0", [], {"id": 1}],
+)
+def test_invalid_occasion_ids_preserve_expenses_and_balances(client, expense_payload, occasion_id):
+    Occasion.objects.create(id=1, name="Dinner")
+    assert post_expense(client, expense_payload).status_code == 201
+    before = list(Expense.objects.values())
+    balances = client.get("/api/balances/").json()
+    response = post_expense(client, {**expense_payload, "occasion": occasion_id})
+    assert response.status_code == 400
+    assert set(response.json()) == {"occasion"}
+    assert response.json()["occasion"]
+    assert list(Expense.objects.values()) == before
+    assert client.get("/api/balances/").json() == balances
+
+
+def test_occasion_filter_preserves_unfiltered_order_and_data(client, expense_payload):
+    dinner = Occasion.objects.create(name="Dinner")
+    trip = Occasion.objects.create(name="Trip")
+    payloads = [
+        expense_payload,
+        {**expense_payload, "occasion": dinner.id},
+        {**expense_payload, "occasion": trip.id},
+        {**expense_payload, "occasion": dinner.id},
+        {**expense_payload, "occasion": dinner.id},
+    ]
+    ids = [post_expense(client, payload).json()["id"] for payload in payloads]
+    timestamp = timezone.now()
+    Expense.objects.all().update(created_at=timestamp)
+    Expense.objects.filter(id=ids[-1]).update(created_at=timestamp - timedelta(days=1))
+    before = list(Expense.objects.values())
+    unfiltered = client.get("/api/expenses/").json()
+    assert [row["id"] for row in unfiltered] == [ids[3], ids[2], ids[1], ids[0], ids[4]]
+    for _ in range(2):
+        response = client.get("/api/expenses/", {"occasion": dinner.id})
+        assert response.status_code == 200
+        assert [row["id"] for row in response.json()] == [ids[3], ids[1], ids[4]]
+        assert response.json() == [
+            row for row in unfiltered if row["occasion"] == {"id": dinner.id, "name": "Dinner"}
+        ]
+    assert client.get("/api/expenses/", {"occasion": trip.id}).json() == [unfiltered[1]]
+    assert client.get("/api/expenses/", {"occasion": 999999}).json() == []
+    assert client.get("/api/expenses/").json() == unfiltered
+    assert list(Expense.objects.values()) == before
+
+
+@pytest.mark.parametrize(
+    "occasion_id",
+    ["", "0", "-1", "1.0", "1.9", "1e0", "true", "null", " 1 ", "1\n", "١", str(2**63), "9" * 100],
+)
+def test_invalid_occasion_filters_return_field_errors(client, expense_payload, occasion_id):
+    assert post_expense(client, expense_payload).status_code == 201
+    before = list(Expense.objects.values())
+    response = client.get("/api/expenses/", {"occasion": occasion_id})
+    assert response.status_code == 400
+    assert set(response.json()) == {"occasion"}
+    assert response.json()["occasion"]
+    assert list(Expense.objects.values()) == before
 
 
 @pytest.mark.parametrize("method", ["put", "patch", "delete", "trace"])

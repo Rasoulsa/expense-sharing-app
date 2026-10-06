@@ -2,20 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent, RefObject } from 'react'
 import { onlineManager, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, createExpense, expenseFields } from './api'
-import type { ExpenseField, Participant } from './api'
-import { participantsQuery, refreshExpenseViews } from './queries'
+import type { ExpenseField, Occasion, Participant } from './api'
+import { occasionsQuery, participantsQuery, refreshExpenseViews } from './queries'
 import { containDialogFocus } from './dialogFocus'
 
 type FormValues = Record<ExpenseField, string>
 type FieldErrors = Partial<FormValues>
 
-function validate(values: FormValues, participants: Participant[]): FieldErrors {
+function validate(values: FormValues, participants: Participant[], occasions: Occasion[]): FieldErrors {
   const errors: FieldErrors = {}
   const payer = participants.find((person) => String(person.id) === values.paid_by)
   const beneficiary = participants.find((person) => String(person.id) === values.expense_for)
   if (!payer) errors.paid_by = 'Choose who paid.'
   if (!beneficiary) errors.expense_for = 'Choose who the expense was for.'
   else if (payer?.id === beneficiary.id) errors.expense_for = 'Choose a different participant from the payer.'
+  if (values.occasion && !occasions.some((occasion) => String(occasion.id) === values.occasion)) errors.occasion = 'Choose an available occasion or No occasion.'
 
   if (values.amount.trim() !== values.amount || !/^[0-9]+(?:\.[0-9]{1,2})?$/.test(values.amount)) {
     errors.amount = 'Enter an amount like 12.34, with up to two decimal places.'
@@ -39,12 +40,13 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
   const formRef = useRef<HTMLFormElement>(null)
   const errorRef = useRef<HTMLParagraphElement>(null)
   const submitting = useRef(false)
-  const [values, setValues] = useState<FormValues>({ paid_by: '', expense_for: '', amount: '', description: '' })
+  const [values, setValues] = useState<FormValues>({ paid_by: '', expense_for: '', occasion: '', amount: '', description: '' })
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
   const [formError, setFormError] = useState<string | null>(null)
   const [errorAttempt, setErrorAttempt] = useState(0)
   const queryClient = useQueryClient()
   const participants = useQuery(participantsQuery)
+  const occasions = useQuery(occasionsQuery)
   const mutation = useMutation({
     mutationFn: createExpense,
     retry: false,
@@ -91,7 +93,8 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
     }
   }, [errorAttempt])
 
-  const canSubmit = participants.isSuccess && participants.data.length >= 2 && !mutation.isPending
+  const canSubmit = participants.isSuccess && participants.data.length >= 2
+    && !mutation.isPending
 
   function close() {
     if (!submitting.current) onClose()
@@ -113,7 +116,7 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (submitting.current || !canSubmit) return
-    const errors = validate(values, participants.data!)
+    const errors = validate(values, participants.data!, occasions.data ?? [])
     setFieldErrors(errors)
     if (Object.keys(errors).length) {
       setFormError('Check the highlighted fields.')
@@ -125,6 +128,7 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
     mutation.mutate({
       paid_by: participants.data!.find((person) => String(person.id) === values.paid_by)!.id,
       expense_for: participants.data!.find((person) => String(person.id) === values.expense_for)!.id,
+      ...(values.occasion ? { occasion: occasions.data!.find((occasion) => String(occasion.id) === values.occasion)!.id } : {}),
       amount: values.amount,
       description: values.description.trim(),
     })
@@ -151,7 +155,7 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
         <h2 ref={titleRef} id="expense-modal-title" tabIndex={-1}>Add Expense</h2>
         <button type="button" className="secondary-button" aria-label="Close Add Expense" onClick={close} disabled={mutation.isPending}>Close</button>
       </header>
-      <p id="expense-modal-description" className="view-description">Record a payment for another person. All fields are required.</p>
+      <p id="expense-modal-description" className="view-description">Record a payment for another person. Occasion is optional; the other fields are required.</p>
 
       {participants.isPending && <p role="status">Loading participants…</p>}
       {participants.isError && (
@@ -163,6 +167,16 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
       {participants.isSuccess && participants.data.length < 2 && (
         <p role="status">At least two participants are needed to record an expense.</p>
       )}
+      {occasions.isPending && <p role="status">Loading occasions…</p>}
+      {occasions.isError && (
+        <div>
+          <p role="alert">Could not load occasions. You can save with No occasion, or retry.</p>
+          <button type="button" onClick={() => { void occasions.refetch() }}>Retry occasions</button>
+        </div>
+      )}
+      {occasions.isSuccess && occasions.data.length === 0 && (
+        <p role="status">No occasions yet. You can save with No occasion.</p>
+      )}
 
       <form ref={formRef} onSubmit={submit} noValidate aria-busy={mutation.isPending}>
         {formError && <p ref={errorRef} className="form-error" role="alert" tabIndex={-1}>{formError}</p>}
@@ -173,7 +187,7 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
             ['expense_for', 'Expense for'],
           ] as const).map(([field, label]) => (
             <div className="form-field" key={field}>
-              <label htmlFor={field}>{label}</label>
+              <label htmlFor={field}>{label} <span className="required-mark" aria-hidden="true">*</span></label>
               <select id={field} name={field} value={values[field]} onChange={(event) => { updateField(field, event.target.value) }} required {...errorAttributes(field)}>
                 <option value="">Choose a participant</option>
                 {participants.data?.map((person) => <option key={person.id} value={person.id}>{person.name}</option>)}
@@ -182,13 +196,22 @@ export default function AddExpenseModal({ onClose, returnFocusRef }: {
             </div>
           ))}
           <div className="form-field">
-            <label htmlFor="amount">Amount</label>
+            <label htmlFor="occasion">Occasion</label>
+            <select id="occasion" name="occasion" value={values.occasion} onChange={(event) => { updateField('occasion', event.target.value) }} {...errorAttributes('occasion', 'occasion-hint')}>
+              <option value="">No occasion</option>
+              {occasions.data?.map((occasion) => <option key={occasion.id} value={occasion.id}>{occasion.name}</option>)}
+            </select>
+            <p className="field-hint" id="occasion-hint">Optional. Leave ungrouped or choose an occasion.</p>
+            {fieldErrors.occasion && <p className="field-error" id="occasion-error">{fieldErrors.occasion}</p>}
+          </div>
+          <div className="form-field">
+            <label htmlFor="amount">Amount <span className="required-mark" aria-hidden="true">*</span></label>
             <input id="amount" name="amount" type="text" inputMode="decimal" value={values.amount} onChange={(event) => { updateField('amount', event.target.value) }} required {...errorAttributes('amount', 'amount-hint')} />
             <p className="field-hint" id="amount-hint">USD · 0.01 to 999999.99, with up to two decimal places.</p>
             {fieldErrors.amount && <p className="field-error" id="amount-error">{fieldErrors.amount}</p>}
           </div>
           <div className="form-field">
-            <label htmlFor="description">Description</label>
+            <label htmlFor="description">Description <span className="required-mark" aria-hidden="true">*</span></label>
             <textarea id="description" name="description" rows={3} value={values.description} onChange={(event) => { updateField('description', event.target.value) }} required {...errorAttributes('description', 'description-hint')} />
             <p className="field-hint" id="description-hint">Up to 500 characters.</p>
             {fieldErrors.description && <p className="field-error" id="description-error">{fieldErrors.description}</p>}

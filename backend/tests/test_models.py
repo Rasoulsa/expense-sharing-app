@@ -6,7 +6,7 @@ from django.db import DataError, IntegrityError, connection, transaction
 from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 
-from expenses.models import Expense, Participant
+from expenses.models import Expense, Occasion, Participant
 
 pytestmark = pytest.mark.django_db
 
@@ -27,6 +27,49 @@ def test_participant_name_is_unique():
 def test_invalid_participant_name_fails_validation(name):
     with pytest.raises(ValidationError):
         Participant(name=name).full_clean()
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_empty_occasion_name_rejected_by_database(name):
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Occasion.objects.create(name=name)
+
+
+@pytest.mark.parametrize("name", ["Birthday", "birthday", "BIRTHDAY", " Birthday ", "  bIrThDaY  "])
+def test_occasion_name_is_unique_after_trimming_and_ignoring_case(name):
+    Occasion.objects.create(name="Birthday")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        Occasion.objects.create(name=name)
+
+
+@pytest.mark.parametrize("name", ["", " \t\n", "x" * 101])
+def test_invalid_occasion_name_fails_validation(name):
+    with pytest.raises(ValidationError):
+        Occasion(name=name).full_clean()
+
+
+def test_occasion_name_limit_enforced_by_database():
+    database_error = DataError if connection.vendor == "postgresql" else IntegrityError
+    with pytest.raises(database_error), transaction.atomic():
+        Occasion.objects.create(name="x" * 101)
+
+
+def test_expense_occasion_is_optional_and_protected():
+    alice = Participant.objects.create(name="Alice")
+    bob = Participant.objects.create(name="Bob")
+    ungrouped = Expense.objects.create(paid_by=alice, expense_for=bob, amount_cents=500)
+    assert ungrouped.occasion_id is None
+    ungrouped.full_clean()
+
+    occasion = Occasion.objects.create(name="Dinner")
+    expense = Expense.objects.create(
+        paid_by=alice, expense_for=bob, amount_cents=1234, occasion=occasion
+    )
+    expense.full_clean()
+    with pytest.raises(ProtectedError):
+        occasion.delete()
+    expense.refresh_from_db()
+    assert expense.occasion_id == occasion.id
 
 
 @pytest.mark.parametrize("amount", [0, -1])

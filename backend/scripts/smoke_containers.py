@@ -44,7 +44,10 @@ def main():
     assert request("/api/expenses/") == []
     assert request("/api/balances/") == []
     ids = {person["name"]: person["id"] for person in people}
-    mina = request("/api/participants/", method="POST", data={"name": "Mina Smoke"}, expected=201)
+    request("/api/participants/", method="POST", data={"name": "Mina Smoke"}, expected=405)
+    assert request("/api/occasions/") == []
+    dinner = request("/api/occasions/", method="POST", data={"name": " Dinner "}, expected=201)
+    assert dinner["name"] == "Dinner"
     first = request(
         "/api/expenses/",
         method="POST",
@@ -53,9 +56,11 @@ def main():
             "expense_for": ids["Bob"],
             "amount": "50.00",
             "description": "Container smoke lunch",
+            "occasion": dinner["id"],
         },
         expected=201,
     )
+    assert first["occasion"] == dinner
     reverse = request(
         "/api/expenses/",
         method="POST",
@@ -68,6 +73,18 @@ def main():
         expected=201,
     )
     balances = request("/api/balances/")
+    assert reverse["occasion"] is None
+    assert request(f"/api/expenses/?occasion={dinner['id']}") == [first]
+    duplicate = request("/api/occasions/", method="POST", data={"name": " dinner "}, expected=400)
+    assert duplicate["name"]
+    scoped = request(f"/api/balances/?occasion={dinner['id']}")
+    assert scoped == [
+        {
+            "debtor": {"id": ids["Bob"], "name": "Bob"},
+            "creditor": {"id": ids["Alice"], "name": "Alice"},
+            "amount": "50.00",
+        }
+    ]
     assert len(balances) == 1
     assert balances[0]["debtor"]["id"] == ids["Bob"]
     assert balances[0]["creditor"]["id"] == ids["Alice"]
@@ -76,7 +93,7 @@ def main():
     request(f"/api/expenses/{reverse['id']}/", method="DELETE", expected=404)
     assert request("/api/expenses/") == [first]
     assert request("/api/balances/")[0]["amount"] == "50.00"
-    # Seed reruns must preserve the new person, IDs, and persisted expense.
+    # Seed reruns must preserve people, IDs, occasions, and persisted expenses.
     subprocess.run(
         [
             "docker",
@@ -94,11 +111,15 @@ def main():
         check=True,
         timeout=30,
     )
-    assert mina in request("/api/participants/")
+    assert request("/api/participants/") == people
+    assert request("/api/occasions/") == [dinner]
     assert request("/api/expenses/") == [first]
     assert request("/api/balances/")[0]["amount"] == "50.00"
-    print("PASS: frontend health/SPA, backend health, exact CORS, Add Person, expense writes,")
-    print("pairwise balances, individual deletion/404, and seed preservation on PostgreSQL 17.")
+    print("PASS: frontend health/SPA, backend health, exact CORS, read-only participants,")
+    print(
+        "occasions/filtering, global/filtered pairwise balances, case-variant duplicates, "
+        "deletion/404, and seed preservation."
+    )
 
 
 if __name__ == "__main__":

@@ -1,11 +1,11 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { useIsMutating, useQuery } from '@tanstack/react-query'
 import AddExpenseModal from './AddExpenseModal'
-import AddPersonModal from './AddPersonModal'
+import AddOccasionModal from './AddOccasionModal'
 import DeleteExpenseModal from './DeleteExpenseModal'
-import type { Expense } from './api'
-import { balancesQuery, expensesQuery } from './queries'
+import type { Balance, Expense, Occasion } from './api'
+import { balanceListQuery, expensesQuery, occasionExpensesQuery, occasionsQuery } from './queries'
 
 type View = 'expenses' | 'balances'
 
@@ -27,8 +27,12 @@ function LoadError({ view, retry }: { view: View; retry: () => void }) {
   )
 }
 
-function ExpensesView({ onDelete }: { onDelete: (expense: Expense, trigger: HTMLButtonElement) => void }) {
-  const { data, isPending, isError, refetch } = useQuery(expensesQuery)
+function ExpensesView({ onDelete, occasionFilter, onFilter }: {
+  onDelete: (expense: Expense, trigger: HTMLButtonElement) => void
+  occasionFilter: Occasion | null
+  onFilter: (occasion: Occasion) => void
+}) {
+  const { data, isPending, isError, refetch } = useQuery(occasionFilter ? occasionExpensesQuery(occasionFilter.id) : expensesQuery)
   const isDeleting = useIsMutating({ mutationKey: ['delete-expense'] }) > 0
 
   if (isPending) return <p className="view-state" role="status">Loading expenses…</p>
@@ -36,8 +40,8 @@ function ExpensesView({ onDelete }: { onDelete: (expense: Expense, trigger: HTML
   if (data.length === 0) {
     return (
       <div className="view-state" role="status">
-        <p className="state-title">No expenses yet.</p>
-        <p>Recorded expenses will appear here with who paid and who they were for.</p>
+        <p className="state-title">{occasionFilter ? `No expenses for ${occasionFilter.name}.` : 'No expenses yet.'}</p>
+        <p>{occasionFilter ? 'Clear the filter to see all expenses.' : 'Recorded expenses will appear here with who paid and who they were for.'}</p>
       </div>
     )
   }
@@ -63,6 +67,10 @@ function ExpensesView({ onDelete }: { onDelete: (expense: Expense, trigger: HTML
                 <dt className="visually-hidden">Date</dt>
                 <dd><time dateTime={expense.created_at}>{dateFormatter.format(new Date(expense.created_at))}</time></dd>
               </div>
+              {expense.occasion && <div className="expense-occasion">
+                <dt className="visually-hidden">Occasion</dt>
+                <dd><button type="button" className="occasion-action" aria-label={`Show expenses for ${expense.occasion.name}`} aria-pressed={occasionFilter?.id === expense.occasion.id} aria-controls="expenses-panel" onClick={() => { onFilter(expense.occasion!) }}>{expense.occasion.name}</button></dd>
+              </div>}
             </dl>
           </div>
         </li>
@@ -71,23 +79,59 @@ function ExpensesView({ onDelete }: { onDelete: (expense: Expense, trigger: HTML
   )
 }
 
-function BalancesView() {
-  const { data, isPending, isError, refetch } = useQuery(balancesQuery)
+function BalanceOccasionFilter({ occasionFilter, onFilter }: {
+  occasionFilter: Occasion | null
+  onFilter: (occasion: Occasion | null) => void
+}) {
+  const occasions = useQuery(occasionsQuery)
+  const selectRef = useRef<HTMLSelectElement>(null)
+  const choices = occasions.data ?? []
+  const selectedMissing = occasionFilter && !choices.some((occasion) => occasion.id === occasionFilter.id)
+
+  return (
+    <div className="expense-filter balance-filter" aria-busy={occasions.isFetching}>
+      <div className="form-field">
+        <label htmlFor="balance-occasion-filter">Filter balances by occasion</label>
+        <select ref={selectRef} id="balance-occasion-filter" value={occasionFilter?.id ?? ''} onChange={(event) => {
+          onFilter(choices.find((occasion) => String(occasion.id) === event.target.value) ?? null)
+        }}>
+          <option value="">All occasions</option>
+          {selectedMissing && <option value={occasionFilter.id}>{occasionFilter.name}</option>}
+          {choices.map((occasion) => <option key={occasion.id} value={occasion.id}>{occasion.name}</option>)}
+        </select>
+      </div>
+      {occasionFilter && <button type="button" className="secondary-button" onClick={() => { onFilter(null); selectRef.current?.focus() }}>Clear filter</button>}
+      {occasions.isPending && <p className="field-hint">Loading occasion choices…</p>}
+      {occasions.isError && <div className="filter-error">
+        <p role="alert">Could not load occasion choices. All occasions is still available.</p>
+        <button type="button" onClick={() => { void occasions.refetch() }}>Retry occasion choices</button>
+      </div>}
+    </div>
+  )
+}
+
+function BalancesView({ occasionFilter }: { occasionFilter: Occasion | null }) {
+  const { data, isPending, isError, refetch } = useQuery(balanceListQuery(occasionFilter?.id))
 
   if (isPending) return <p className="view-state" role="status">Loading balances…</p>
   if (isError) return <LoadError view="balances" retry={() => { void refetch() }} />
   if (data.length === 0) {
     return (
       <div className="view-state" role="status">
-        <p className="state-title">No outstanding balances.</p>
-        <p>There are no amounts owed between participants.</p>
+        <p className="state-title">{occasionFilter ? `No outstanding balances for ${occasionFilter.name}.` : 'No outstanding balances.'}</p>
+        <p>{occasionFilter
+          ? 'There are no amounts owed for this occasion. Clear the filter to see all occasions.'
+          : 'All participant pairs are settled across all occasions and ungrouped expenses.'}</p>
       </div>
     )
   }
+  return <BalanceRows balances={data} />
+}
 
+function BalanceRows({ balances }: { balances: Balance[] }) {
   return (
     <ul className="balance-list" role="list" aria-label="Balances">
-      {data.map((balance) => (
+      {balances.map((balance) => (
         <li className="balance-card" key={`${balance.debtor.id}-${balance.creditor.id}`}>
           <PersonMarker name={balance.debtor.name} />
           <p className="balance-statement">
@@ -102,14 +146,21 @@ function BalancesView() {
 
 export default function App() {
   const [view, setView] = useState<View>('expenses')
-  const [dialog, setDialog] = useState<'expense' | 'person' | 'delete' | null>(null)
+  const [dialog, setDialog] = useState<'expense' | 'occasion' | 'delete' | null>(null)
+  const [expenseOccasion, setExpenseOccasion] = useState<Occasion | null>(null)
+  const [balanceOccasion, setBalanceOccasion] = useState<Occasion | null>(null)
   const [expenseToDelete, setExpenseToDelete] = useState<Expense | null>(null)
   const [successMessage, setSuccessMessage] = useState('')
   const addExpenseButton = useRef<HTMLButtonElement>(null)
-  const addPersonButton = useRef<HTMLButtonElement>(null)
+  const addOccasionButton = useRef<HTMLButtonElement>(null)
+  const clearFilterButton = useRef<HTMLButtonElement>(null)
   const deleteExpenseButton = useRef<HTMLButtonElement>(null)
   const expensesTab = useRef<HTMLButtonElement>(null)
   const balancesTab = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (expenseOccasion && !clearFilterButton.current?.closest('[hidden]')) clearFilterButton.current?.focus()
+  }, [expenseOccasion])
 
   function handleTabKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     let nextView: View
@@ -143,7 +194,7 @@ export default function App() {
             <p className="description">Record expenses. See who owes whom.</p>
           </div>
           <div className="page-actions">
-            <button ref={addPersonButton} type="button" className="secondary-button" aria-haspopup="dialog" onClick={() => { setSuccessMessage(''); setDialog('person') }}>Add Person</button>
+            <button ref={addOccasionButton} type="button" className="secondary-button" aria-haspopup="dialog" onClick={() => { setSuccessMessage(''); setDialog('occasion') }}>Add Occasion</button>
             <button ref={addExpenseButton} type="button" aria-haspopup="dialog" onClick={() => { setDialog('expense') }}>Add Expense</button>
           </div>
         </header>
@@ -175,7 +226,11 @@ export default function App() {
         <section id="expenses-panel" role="tabpanel" aria-labelledby="expenses-tab" tabIndex={0} hidden={view !== 'expenses'}>
           <h2>Expenses</h2>
           <p className="view-description">See who paid and who each expense was for.</p>
-          {view === 'expenses' && <ExpensesView onDelete={(expense, trigger) => {
+          {expenseOccasion && <div className="expense-filter">
+            <p role="status">Showing expenses for <strong>{expenseOccasion.name}</strong>.</p>
+            <button ref={clearFilterButton} type="button" className="secondary-button" onClick={() => { setExpenseOccasion(null); expensesTab.current?.focus() }}>Clear filter</button>
+          </div>}
+          {view === 'expenses' && <ExpensesView occasionFilter={expenseOccasion} onFilter={setExpenseOccasion} onDelete={(expense, trigger) => {
             deleteExpenseButton.current = trigger
             setExpenseToDelete(expense)
             setDialog('delete')
@@ -183,12 +238,15 @@ export default function App() {
         </section>
         <section id="balances-panel" role="tabpanel" aria-labelledby="balances-tab" tabIndex={0} hidden={view !== 'balances'}>
           <h2>Balances</h2>
-          <p className="view-description">See what is owed between each pair of people.</p>
-          {view === 'balances' && <BalancesView />}
+          <p className="view-description">{balanceOccasion ? `See what is owed between each pair of people for ${balanceOccasion.name}.` : 'See what is owed between each pair of people across all occasions and ungrouped expenses.'}</p>
+          {view === 'balances' && <>
+            <BalanceOccasionFilter occasionFilter={balanceOccasion} onFilter={setBalanceOccasion} />
+            <BalancesView occasionFilter={balanceOccasion} />
+          </>}
         </section>
       </section>
       {dialog === 'expense' && <AddExpenseModal onClose={() => { setDialog(null) }} returnFocusRef={addExpenseButton} />}
-      {dialog === 'person' && <AddPersonModal onClose={() => { setDialog(null) }} onCreated={(person) => { setSuccessMessage(`${person.name} added. You can now select them in Add Expense.`) }} returnFocusRef={addPersonButton} />}
+      {dialog === 'occasion' && <AddOccasionModal onClose={() => { setDialog(null) }} onCreated={(occasion) => { setSuccessMessage(`${occasion.name} added. You can now select it in Add Expense.`) }} returnFocusRef={addOccasionButton} />}
       {dialog === 'delete' && expenseToDelete && <DeleteExpenseModal
         expense={expenseToDelete}
         onClose={() => { setDialog(null); setExpenseToDelete(null) }}

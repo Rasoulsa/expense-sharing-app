@@ -3,11 +3,12 @@ import { onlineManager, QueryClient, QueryClientProvider } from '@tanstack/react
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from './App'
 import type { Expense } from './api'
-import { balancesQuery, participantsQuery } from './queries'
+import { balancesQuery, occasionsQuery, participantsQuery } from './queries'
 
 const people = [{ id: 17, name: 'Maya' }, { id: 93, name: 'Theo' }]
+const occasions = [{ id: 55, name: 'Dinner' }]
 const expense: Expense = {
-  id: 81, paid_by: people[0], expense_for: people[1], amount: '12.30',
+  id: 81, paid_by: people[0], expense_for: people[1], occasion: null, amount: '12.30',
   description: 'Train tickets', created_at: '2026-10-04T10:00:00Z',
 }
 const fetchMock = vi.fn<typeof fetch>()
@@ -15,35 +16,36 @@ const clients: QueryClient[] = []
 const methods = ['showModal', 'close'] as const
 const originals = methods.map((method) => Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, method))
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status })
-type Write = 'expense' | 'person' | 'delete'
+type Write = 'expense' | 'occasion' | 'delete'
 let pendingWrite: Promise<Response> | undefined
 
 async function renderCachedApp() {
   const client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } })
   clients.push(client)
-  await Promise.all([client.fetchQuery(participantsQuery), client.fetchQuery(balancesQuery)])
+  await Promise.all([client.fetchQuery(participantsQuery), client.fetchQuery(balancesQuery), client.fetchQuery(occasionsQuery)])
   render(<QueryClientProvider client={client}><App /></QueryClientProvider>)
   await screen.findByRole('heading', { name: 'Train tickets' })
   return client
 }
 
 function openWrite(write: Write) {
-  const triggerName = write === 'expense' ? 'Add Expense' : write === 'person' ? 'Add Person' : 'Delete expense: Train tickets ($12.30)'
+  const triggerName = write === 'expense' ? 'Add Expense' : write === 'occasion' ? 'Add Occasion' : 'Delete expense: Train tickets ($12.30)'
   const trigger = screen.getByRole('button', { name: triggerName })
   trigger.focus()
   fireEvent.click(trigger)
-  const title = write === 'expense' ? 'Add Expense' : write === 'person' ? 'Add Person' : 'Delete Expense?'
+  const title = write === 'expense' ? 'Add Expense' : write === 'occasion' ? 'Add Occasion' : 'Delete Expense?'
   const dialog = screen.getByRole('dialog', { name: title })
   if (write === 'expense') {
-    fireEvent.change(within(dialog).getByLabelText('Paid by'), { target: { value: '17' } })
-    fireEvent.change(within(dialog).getByLabelText('Expense for'), { target: { value: '93' } })
-    fireEvent.change(within(dialog).getByLabelText('Amount'), { target: { value: '12.30' } })
-    fireEvent.change(within(dialog).getByLabelText('Description'), { target: { value: 'Train tickets' } })
-  } else if (write === 'person') {
+    fireEvent.change(within(dialog).getByLabelText(/^Paid by/), { target: { value: '17' } })
+    fireEvent.change(within(dialog).getByLabelText(/^Expense for/), { target: { value: '93' } })
+    fireEvent.change(within(dialog).getByLabelText(/^Occasion/), { target: { value: '55' } })
+    fireEvent.change(within(dialog).getByLabelText(/^Amount/), { target: { value: '12.30' } })
+    fireEvent.change(within(dialog).getByLabelText(/^Description/), { target: { value: 'Train tickets' } })
+  } else if (write === 'occasion') {
     fireEvent.change(within(dialog).getByLabelText('Name'), { target: { value: 'Leila' } })
   }
-  const saveName = write === 'expense' ? 'Save Expense' : write === 'person' ? 'Save Person' : 'Delete Expense'
-  const closeName = write === 'expense' ? 'Close Add Expense' : write === 'person' ? 'Close Add Person' : 'Cancel'
+  const saveName = write === 'expense' ? 'Save Expense' : write === 'occasion' ? 'Save Occasion' : 'Delete Expense'
+  const closeName = write === 'expense' ? 'Close Add Expense' : 'Cancel'
   return { dialog, trigger, saveName, closeName }
 }
 
@@ -53,7 +55,7 @@ function writes() {
 
 function successResponse(write: Write) {
   return write === 'delete' ? new Response(null, { status: 204 })
-    : write === 'person' ? json({ id: 315, name: 'Leila' }, 201) : json({ ...expense, id: 82 }, 201)
+    : write === 'occasion' ? json({ id: 315, name: 'Leila' }, 201) : json({ ...expense, id: 82 }, 201)
 }
 
 beforeEach(() => {
@@ -65,8 +67,9 @@ beforeEach(() => {
     if (options?.method === 'POST' || options?.method === 'DELETE') {
       if (pendingWrite) return pendingWrite
       if (options.method === 'DELETE') return Promise.resolve(successResponse('delete'))
-      return Promise.resolve(successResponse(path === '/api/participants/' ? 'person' : 'expense'))
+      return Promise.resolve(successResponse(path === '/api/occasions/' ? 'occasion' : 'expense'))
     }
+    if (path === '/api/occasions/') return Promise.resolve(json(occasions))
     if (path === '/api/participants/') return Promise.resolve(json(people))
     if (path === '/api/expenses/') return Promise.resolve(json([expense]))
     if (path === '/api/balances/') return Promise.resolve(json([{ debtor: people[1], creditor: people[0], amount: '12.30' }]))
@@ -96,7 +99,7 @@ afterEach(() => {
 
 it.each([
   ['expense', 'button'], ['expense', 'Escape'],
-  ['person', 'button'], ['person', 'Escape'],
+  ['occasion', 'button'], ['occasion', 'Escape'],
   ['delete', 'button'], ['delete', 'Escape'],
 ] as const)('%s fails offline, allows %s, and never writes on reconnect', async (write, dismiss) => {
   const client = await renderCachedApp()
@@ -111,9 +114,9 @@ it.each([
   const close = within(dialog).getByRole('button', { name: closeName }) as HTMLButtonElement
   expect(close.disabled).toBe(false)
   if (write === 'expense') {
-    expect((within(dialog).getByLabelText('Amount') as HTMLInputElement).value).toBe('12.30')
-    expect((within(dialog).getByLabelText('Amount').closest('fieldset')!).disabled).toBe(false)
-  } else if (write === 'person') {
+    expect((within(dialog).getByLabelText(/^Amount/) as HTMLInputElement).value).toBe('12.30')
+    expect((within(dialog).getByLabelText(/^Amount/).closest('fieldset')!).disabled).toBe(false)
+  } else if (write === 'occasion') {
     const input = within(dialog).getByLabelText('Name') as HTMLInputElement
     expect(input.value).toBe('Leila')
     expect(input.disabled).toBe(false)
@@ -132,7 +135,7 @@ it.each([
   expect(client.getMutationCache().getAll().every((mutation) => mutation.state.status === 'error' && !mutation.state.isPaused)).toBe(true)
 })
 
-it.each(['expense', 'person', 'delete'] as const)('%s settles when its successful response is followed by offline-paused reads', async (write) => {
+it.each(['expense', 'occasion', 'delete'] as const)('%s settles when its successful response is followed by offline-paused reads', async (write) => {
   const client = await renderCachedApp()
   const { dialog, saveName } = openWrite(write)
   let resolve!: (response: Response) => void
@@ -145,7 +148,7 @@ it.each(['expense', 'person', 'delete'] as const)('%s settles when its successfu
   })
   await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
   await waitFor(() => { expect(client.isMutating()).toBe(0) })
-  const key = write === 'person' ? ['participants'] : ['expenses']
+  const key = write === 'occasion' ? ['occasions'] : ['expenses']
   // Reads retain their normal online-only behavior while the write has settled.
   expect(client.getQueryState(key)?.fetchStatus).toBe('paused')
   expect(writes()).toHaveLength(1)

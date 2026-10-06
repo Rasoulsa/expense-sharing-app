@@ -3,11 +3,14 @@ from collections import defaultdict
 from expenses.models import Expense
 
 
-def calculate_balances():
+def calculate_balances(occasion_id=None):
     """Derive debts from persisted expenses, netting only within each participant pair."""
     totals = defaultdict(int)
     participants = {}
-    for expense in Expense.objects.select_related("paid_by", "expense_for").iterator():
+    expenses = Expense.objects.select_related("paid_by", "expense_for")
+    if occasion_id is not None:
+        expenses = expenses.filter(occasion_id=occasion_id)
+    for expense in expenses.iterator():
         payer_id = expense.paid_by_id
         beneficiary_id = expense.expense_for_id
         participants[payer_id] = expense.paid_by
