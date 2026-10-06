@@ -1,313 +1,287 @@
 # Architecture and implementation plan
 
 [challenge-spec.md](challenge-spec.md) is the authoritative interview specification.
-The choices below keep this four-day implementation small and follow that specification.
+Participants are seeded and read-only. Occasions and individual expense deletion
+are the requested extensions; authentication, registration, groups, and settlement
+are outside this implementation.
 
 ## Application boundary
 
-The repository contains a Django 5.2 LTS / Django REST Framework backend managed
-by uv and a React / TypeScript / Vite frontend managed by npm. The browser uses
-the API URL supplied through `VITE_API_BASE_URL`. The local Vite origin is
-`http://localhost:5173`; Django permits exactly that CORS origin during development.
+Django 5.2 LTS / Django REST Framework supplies an anonymous JSON API, managed by
+uv. React / TypeScript / Vite supplies one responsive page, managed by npm. The
+browser calls the public API origin compiled through `VITE_API_BASE_URL`. Local
+Vite uses `http://localhost:5173`; Django allows exactly that development CORS
+origin. CORS is a browser origin policy, not authentication.
 
-Day 3 slice 1 replaces the participant scaffold with one responsive page using
-Expenses and Balances tabs, with Expenses selected initially. TanStack Query
-loads each view through the typed fetch client, treats results as fresh for 30 seconds,
-and cancels pending requests when leaving a view. Each view has loading, empty,
-error, and explicit retry states. Tabs support arrow keys, Home, and End;
-expense fields use labeled definitions and dates use semantic `time` elements.
-Nested participant details come directly from the API; IDs stay numeric and
-amounts stay decimal strings, displayed with a dollar prefix. No frontend
-balance arithmetic is performed. The participants GET client supplies the
-Add Expense modal. Vitest/React Testing Library tests exercise
-the real client through mocked fetch, without a running backend.
+Expenses is the initial tab; Balances shows global pairwise debts by default, or the selected occasion’s debts.
+Both have loading, empty, error, and explicit retry states. Tabs support arrow
+keys, Home, and End. Semantic lists, labeled definitions, and `time` elements
+expose expense fields; amounts remain decimal strings with a dollar prefix.
+The frontend does no balance arithmetic.
 
-Day 3 slice 2 adds the Add Expense button and a native modal dialog. The browser
-makes the background inert; the modal explicitly wraps Tab/Shift+Tab among
-enabled controls. Opening focuses the
-dialog heading; Escape or Close dismisses it and restores focus to the button.
-Participant options come from the API with loading, error/retry, and insufficient
-participant states. The form validates participant choices, distinctness,
-decimal syntax/range, and a trimmed description of at most 500 Unicode characters.
-It uses a text amount field with decimal input mode, checks the range with exact
-integer cents, and submits numeric participant IDs and the original decimal
-string. Backend field errors remain associated with their inputs; failed POSTs
-preserve all values and allow retry. Pending saves disable editing, dismissal,
-and duplicate submission. Successful saves close the dialog, cancel any reads
-started before the save, invalidate both list queries, and fetch fresh expenses
-and balances, including an unopened view.
-Refresh failures use the existing view error/retry state. Query options live in
-`frontend/src/queries.ts`; the slice 1 query keys remain unchanged.
+`seed_participants` uses `get_or_create` for Alice, Bob, Charlie, and David.
+Two runs on a fresh database leave exactly four participants. Existing IDs,
+extra participants, and all expenses survive reruns. Participants from the API
+remain available in expense selects; the application has no participant creation,
+editing, or deletion flow.
 
-Day 3 browser validation uses Playwright Chromium against real Vite and Django
-servers. `frontend/playwright.config.ts` starts both without server reuse, using
-`http://localhost:5173` as the exact allowed CORS origin and
-`http://127.0.0.1:8001` as the API URL. The test-only backend launcher creates a
-fresh temporary SQLite database, disables `.env` loading and inherited
-PostgreSQL settings, migrates and seeds, then serves until Playwright shuts it
-down. Shutdown closes database connections and removes the temporary database.
-The single journey verifies fetched participant names, both directions of modal
-focus wrapping and Escape, opposite expenses of `50.00` and `20.00`, the
-resulting `Bob owes Alice $30.00`, and persistence after reload. It additionally
-creates Mina Farah through Add Person, checks that both expense selects refresh,
-and records an Alice-for-Mina `15.00` expense, preserving the independent Bob debt.
-Desktop and 320px phone checks save layout screenshots, including the dialogs.
-The journey also cancels deletion without a DELETE or persisted changes, removes
-the `20.00` reverse expense, and verifies `Bob owes Alice $50.00` after reload.
-Another client's real API deletion produces a deterministic stale-card 404,
-which the browser displays without dismissing the confirmation.
-Requests are
-real and waits observe responses/UI state. Browser specs stay separate from
-Vitest and are included in TypeScript and ESLint checks.
+## Occasions and accessible forms
 
-The focused Day 3 improvement adds an optional Add Person native dialog. Opening
-focuses its name input; both dialogs share the same Tab/Shift+Tab wrapping helper.
-Escape and Close restore their trigger focus when idle. Local validation rejects
-blank names and names longer than 100 Unicode characters after trimming. Backend
-field errors are associated with the name input, and failed saves retain its value.
-Pending saves disable editing, dismissal, and repeated submission. Successful
-creation announces the new person, closes the dialog, cancels older participant
-reads, and invalidates/refetches the existing participants query. Expenses still
-submit numeric IDs with decimal string amounts. Refresh failures use the existing
-participant query retry state. The page uses compact green rows with decorative
-initials, description, payer → beneficiary, a prominent amount, and semantic dates;
-each balance remains readable as “X owes Y $Z”.
+Add Occasion opens a native modal with focus on its required name input. Local
+validation trims the name and rejects blank or more than 100 Unicode characters.
+Field-level API errors are associated with the input. Failure preserves values;
+Cancel, Close, and Escape work after the failed request settles. Pending saves
+disable editing/dismissal and a synchronous guard prevents duplicate requests.
+Success announces the name, closes the modal, cancels earlier occasion reads,
+and invalidates/refetches the occasion list, even before Add Expense is opened.
+Refresh errors appear through the occasion loading/retry state in Add Expense.
 
-Single-expense deletion adds a Delete action to each card and a native
-confirmation naming its description and amount. Opening focuses Cancel; Escape
-or Cancel returns focus to that card without changing data. Pending deletion
-disables controls and dismissal and prevents duplicate requests. After a 204,
-older GETs are canceled before the deleted ID is removed from the expenses cache,
-so canceling a later refresh cannot restore the card or allow another DELETE.
-Errors remain in the confirmation with an alert and focus; a 404 explains that the list needs
-reloading. On success, focus moves to the stable Expenses tab, a status message
-announces removal, and both expense/balance queries refresh. Creation and deletion
-share `refreshExpenseViews`, including cancellation of older reads and fetching
-an unopened view. Refreshes run independently of the completed mutation, so slow
-or offline-paused reads cannot keep a successful write pending. All three write
-mutations use `networkMode: 'always'` with `retry: false`: an offline fetch fails
-with an error, releases the controls and Escape, and is not queued for reconnection.
-Read queries retain their online-only behavior. A refresh failure uses the existing
-view retry state after the successful mutation. No optimistic balance arithmetic
-is performed.
+Add Expense focuses its heading and obtains participants and occasions from the
+API. The four required labels—Paid by, Expense for, Amount, Description—have a
+visible red asterisk hidden from the accessible name; native `required`,
+`aria-invalid`, associated hints/errors, and error focus expose validation.
+Occasion has no required marker or required validation. Its empty choice is
+No occasion and omits `occasion` from the POST payload. Saving remains possible
+with no occasions or a pending/failed occasion lookup; that lookup has a retry
+control. A selected occasion must exist. Payer/beneficiary must exist and differ.
+Amount uses a text field with decimal input mode and exact-cent validation.
+Description is trimmed and bounded to 500 Unicode characters. Submitted IDs
+are numeric; amount is a decimal string. API failure preserves all fields.
+Pending writes prevent duplicates.
 
-Participants are seeded beforehand. `seed_participants` ensures Alice, Bob,
-Charlie, and David exist using `get_or_create`, preserving participant IDs and
-existing expenses. A fresh database still has exactly four participants after
-two runs. People added through the API and expenses involving them survive reruns.
-Optional participant creation is a user-requested Day 3 extension to the original
-challenge; no login, authentication, or registration is introduced.
-All three application endpoints are anonymous; participants and expenses support
-listing and creation, while balances reject writes. CORS is a
-browser origin policy and does not turn the public API into an authenticated API.
+Native dialogs make the background inert and share explicit Tab/Shift+Tab focus
+wrapping. Idle dismissal restores trigger focus. Each expense card has an
+individual Delete action with confirmation, description/amount, and initial focus
+on Cancel. Failure retains the confirmation with an alert; stale-ID 404 explains
+that reload is needed. Successful deletion focuses the stable Expenses tab.
+
+Assigned expenses show their occasion name as a keyboard-accessible button with
+an accessible filtering label and pressed state. It filters Expenses by occasion
+ID and focuses Clear filter. The filter remains clearable while loading, empty,
+or failed. Clearing restores all expenses and focuses the Expenses tab.
+Historical `occasion: null` expenses appear in the unfiltered list. Expenses and
+Balances retain independent occasion selections, both defaulting to All occasions.
+Expense badges affect only Expenses; the Balances selector affects only Balances.
+Switching tabs never copies a selection. Clear filter changes only the current tab.
+Balances shows exactly one list: All occasions calls `GET /api/balances/` and shows
+the global pairwise net; a named occasion calls `GET /api/balances/?occasion=<id>`.
+An empty global list clearly indicates all pairs are settled, including opposing
+expenses that cancel across occasions. There are no grouped balance sections.
+Filtered empty states and subtitles name the occasion; changing the Balances
+select retains keyboard focus. Compact green rows, wrapping names/actions,
+and scrollable dialogs preserve desktop and 320px layouts.
+
+## Query and mutation behavior
+
+TanStack Query's shared options live in `frontend/src/queries.ts`. Reads pass an
+AbortSignal to the typed fetch client, have no automatic retry, and are fresh for
+30 seconds. Leaving a view/filter cancels its read. Query keys are:
+
+| Data | Key |
+| --- | --- |
+| Participants | `['participants']` |
+| Occasions | `['occasions']` |
+| All expenses | `['expenses']` |
+| One occasion's expenses | `['expenses', { occasion: id }]` |
+| Global balances | `['balances']` |
+| One occasion’s balances | `['balances', { occasion: id }]` |
+
+Expense creation/deletion share `refreshExpenseViews`: cancel all expense-prefix
+reads and all balance-prefix reads, invalidate those caches, then refresh all cached
+expense lists and balance queries, including inactive filters, plus the unfiltered
+expense list and global balances even if unopened.
+Deletion removes its ID from every cached expense list **after cancellation**;
+otherwise restoring a canceled read's snapshot could bring back a deleted card.
+Occasion creation only refreshes occasion options; it does not change expenses
+or balances.
+
+Refreshes run independently of completed mutations: slow or offline-paused reads
+cannot keep successful writes pending. Occasion/expense creation and deletion use
+`networkMode: 'always'` and `retry: false`. An offline write fails and releases its
+controls; it is never queued for reconnection. Read queries retain online-only
+behavior. Refresh failure uses the corresponding query's retry state. There is
+no optimistic balance arithmetic.
 
 ## Data and financial semantics
 
-`Participant` has a unique, nonempty display name. `Expense` records exactly
-one payer (`paid_by`) and one beneficiary (`expense_for`), who must be different.
-The beneficiary owes the payer. For example, Alice paying 5,000 cents for Bob
-means Bob owes Alice 5,000 cents.
+`Participant` has a unique, nonblank name of at most 100 characters. `Occasion`
+has a unique, nonblank name of at most 100 characters and ordering by name then ID.
+The occasion API keeps trimmed spelling for display and reports equivalent names
+as HTTP 400 `name` errors, including insertion races. `expenses/names.py` defines
+one stable canonicalization function: trim, NFC, casefold, NFC. It is shared by
+API validation, model writes, and migration backfill/collision detection. For
+example, Été, été, and decomposed Été share a key; Straße and STRASSE share another.
+Accents remain significant. A stored, internal `canonical_name` text column has
+non-null, nonblank and unique database constraints on both SQLite and PostgreSQL.
+It does not depend on database lowercase/collation rules or change API types.
 
-Amounts are positive integer cents, avoiding floating-point arithmetic for
-money. Descriptions are bounded to 500 characters. Foreign keys protect
-participants referenced by expenses from deletion. Creation timestamps are
-generated on the backend and stored/read with timezone support in UTC.
+Model saves (including `update_fields`) and bulk inserts derive keys, and literal
+queryset name updates update both columns. Direct key updates and expression/bulk
+name updates are rejected to prevent stale keys; use model saves or literal
+updates. Raw SQL writes must explicitly preserve the shared canonicalization
+invariant. The algorithm is versioned: changing it or its Unicode rules requires
+a new backfill/collision migration rather than rewriting stored keys implicitly.
 
-The balance service, `backend/expenses/services.py::calculate_balances`, reads
-persisted expenses on each query and accumulates signed integer cents keyed by
-the lower and higher participant IDs. A payment by the lower ID adds cents;
-a payment by the higher ID subtracts cents. The sign selects the creditor and
-debtor, and the absolute value gives the positive debt. It creates no balance
-records and does not change expenses or cache results between requests.
+`Expense` records a distinct payer (`paid_by`) and beneficiary (`expense_for`),
+a positive integer `amount_cents`, a description bounded to 500 characters, a
+server-generated UTC timestamp, and a nullable `occasion` foreign key.
+Participant and occasion references use `PROTECT`. Migration `0002_occasions`
+creates the occasion table and adds that nullable foreign key without a default,
+backfill, or data deletion. Old expenses retain their fields and IDs and have
+`occasion_id = NULL`; old backend code can continue inserting ungrouped expenses
+against the expanded schema. Applied migration `0003_occasion_case_insensitive_names`
+is unchanged. New `0004_occasion_canonical_names` replaces its inadequate SQL
+lowercase index with the unique canonical key. A read-only preflight reports
+conflicting IDs and spellings before adding the column; a second check precedes
+backfill. It stages a nullable column, backfills only keys, then makes them
+non-null/nonblank/unique. Existing names, IDs, participants, and expense references
+are preserved. Explicitly rename distinct conflicting occasions after owner
+review; there is no automatic merge/delete. Migration 0001 and seeding are unchanged.
 
-The calculation nets repeated and reverse expenses within each unordered pair of
-participants. If Alice pays 5,000 cents for Bob and Bob pays 2,000 cents for
-Alice, Bob owes Alice 3,000 cents. A zero net pair is omitted. Debts involving
-a third participant remain separate; there is no global debt optimization or
-automatic transfer of debts across people. For example, if Bob also pays 2,500
-cents for Charlie, Charlie owes Bob 2,500 cents while Bob still owes Alice 3,000
-cents. Chains and cycles are not simplified through a third participant.
+The beneficiary owes the payer: Alice paying 5,000 cents for Bob means Bob owes
+Alice 5,000 cents. `calculate_balances` reads all persisted expenses by default,
+or filters expenses by the supplied occasion ID before accumulating signed
+integer cents keyed by the lower/higher participant IDs. The sign chooses debtor/creditor and the absolute value gives the debt.
+Repeated/reverse expenses net within each unordered pair in the selected scope.
+The global default includes every occasion and ungrouped history. Exact-zero pairs
+disappear. No balance records are stored.
+
+Alice paying 50.00 for Bob and Bob paying 20.00 for Alice, even in different
+occasions, yields Bob owing Alice 30.00. Bob paying 25.00 for Charlie adds a separate
+Charlie-to-Bob debt. Chains and cycles stay pairwise; no transitive simplification
+or global debt optimization occurs. For the 50.00 Birthday payment and reverse
+20.00 Trip payment, Birthday yields Bob owing Alice 50.00, Trip yields Alice owing
+Bob 20.00, and the default global result is Bob owing Alice 30.00. Filtering
+already-netted global rows would give the wrong result and is never used.
 
 ## Application API
 
 | Endpoint | Contract |
 | --- | --- |
-| `GET /api/participants/` | Array of `{id, name}`, ordered by name then ID. |
-| `POST /api/participants/` | Accepts `{name}`, trims whitespace, rejects blank, overlong (100 characters), and duplicate names with field-level 400 errors; returns 201 `{id, name}`. IDs are server-owned. PUT, PATCH, and DELETE return 405. |
-| `GET /api/expenses/` | Array ordered by `-created_at`, then `-id`; each expense includes nested payer/beneficiary, a two-decimal amount string, description, and server-owned UTC ISO 8601 timestamp. |
-| `POST /api/expenses/` | Accepts existing, distinct participant IDs, decimal string amount, and description. Returns 201 with the created expense, or 400 with useful field errors. Other write methods on the collection return 405. |
-| `DELETE /api/expenses/{id}/` | Removes exactly one expense, returning 204 with an empty body; unknown/already-deleted IDs return 404. Other operation methods on the detail URL return 405. |
-| `GET /api/balances/` | Array of `{debtor, creditor, amount}`, with nested `{id, name}` participants and a positive two-decimal amount string, ordered by debtor ID then creditor ID. All other methods return 405. |
+| `GET /api/participants/` | Array of `{id, name}`, ordered by name then ID. POST, PUT, PATCH, DELETE return 405. Existing extra participants are retained. |
+| `GET /api/occasions/` | Array of `{id, name}`, ordered by name then ID. |
+| `POST /api/occasions/` | Required trimmed name, case-insensitively unique and at most 100 characters; 201 `{id, name}` or field-level 400 `name` errors. Other writes return 405. |
+| `GET /api/expenses/` | Array ordered by `-created_at`, then `-id`; nested payer/beneficiary, nested occasion or null, two-decimal amount string, description, UTC ISO 8601 timestamp. |
+| `GET /api/expenses/?occasion=<id>` | Positive integer occasion ID filters with the same ordering; nonexistent IDs return `[]`, invalid filters return field-level 400 errors. |
+| `POST /api/expenses/` | Existing distinct participant IDs, decimal string amount, description, optional existing occasion ID or null; 201 expense or field-level 400 errors. Other collection writes return 405. |
+| `DELETE /api/expenses/{id}/` | Exactly one deletion; 204 empty body or 404 if missing. Other operation methods return 405. |
+| `GET /api/balances/?occasion=<id>` | Pairwise debts recomputed from only that occasion’s expenses, with the same ID validation as Expenses; unknown IDs/empty occasions return `[]`. |
+| `GET /api/balances/` | Global pairwise `{debtor, creditor, amount}` array, nested participants, positive decimal string, ordered by debtor ID then creditor ID. Writes return 405. |
 
-All GET arrays return `[]` when empty. Balance pairs with exact cancellation are
-also omitted. Participant creation is optional; expense deletion is limited to
-one ID at a time. There is no editing, bulk deletion, participant deletion,
-balance deletion, settlement, or authentication feature.
+All GET arrays return `[]` when empty. Backend occasion omission/null remains
+compatible with older expense clients during rollout; the frontend also permits
+No occasion and omits the request field. Response `Expense.occasion` is always nested `{id, name}` or
+null, while request `NewExpense.occasion` is optional `number | null`.
+Both expenses and balances accept an occasion filter. There is no editing, bulk
+deletion, participant/occasion deletion, settlement, or authentication API.
 
-Names retain their original spelling and case after trimming. Uniqueness uses the
-existing model's exact name constraint. The serializer also turns a uniqueness
-collision during insertion into a field-level error, without changing the schema.
+Amounts are ASCII decimal strings from `0.01` to `999999.99`, with at most two
+fractional digits. `"1"`/`"1.2"` become `"1.00"`/`"1.20"`. Numeric JSON amounts,
+exponents, signs, whitespace, zero, negatives, and excess precision are rejected.
+Conversion uses `Decimal`, storage/calculation integer cents. Balance totals may
+exceed the per-expense cap. API descriptions are required, trimmed, nonempty, and
+bounded to 500 characters; model descriptions may be empty. IDs/timestamps are
+server-owned. Supplied occasion IDs must be positive JSON integers referring to
+existing rows, not strings or booleans.
 
-Expense amounts must be exact decimal strings of ASCII digits with an optional
-decimal point and one or two fractional digits, from `0.01` through `999999.99`.
-Whole-number strings such as `"1"` and one-place strings such as `"1.2"` are
-accepted and returned as `"1.00"` and `"1.20"`. Numeric JSON values, exponent
-notation, signs, zero, negative values, whitespace, and excessive precision are
-rejected. The serializer uses `Decimal` for conversion to integer cents and for
-response formatting; balance arithmetic uses integers. A balance can exceed the
-per-expense input cap. API descriptions are trimmed, required, nonempty, and
-bounded by the model's 500-character limit after trimming. The expense's `id` and
-`created_at` are read-only; timestamps are generated on the server and returned in UTC even
-if another timezone is active.
-
-Example `GET /api/participants/` response (IDs depend on the database):
-
-```json
-[{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]
-```
-
-Example `POST /api/expenses/` request:
+Example request after fetching participant IDs and creating/fetching occasion 9:
 
 ```json
 {
   "paid_by": 1,
   "expense_for": 2,
+  "occasion": 9,
   "amount": "50.00",
-  "description": "Lunch"
+  "description": "Dinner"
 }
 ```
 
-Example 201 response; `GET /api/expenses/` wraps expense objects in an array:
+Example response (list GET wraps these objects in an array):
 
 ```json
 {
   "id": 1,
   "paid_by": {"id": 1, "name": "Alice"},
   "expense_for": {"id": 2, "name": "Bob"},
+  "occasion": {"id": 9, "name": "Dinner"},
   "amount": "50.00",
-  "description": "Lunch",
+  "description": "Dinner",
   "created_at": "2026-10-04T10:00:00Z"
 }
 ```
 
-Example `GET /api/balances/` response after that expense and a reverse `20.00`
-payment from Bob for Alice:
-
-```json
-[
-  {
-    "debtor": {"id": 2, "name": "Bob"},
-    "creditor": {"id": 1, "name": "Alice"},
-    "amount": "30.00"
-  }
-]
-```
+An omitted/null occasion creates the same response shape with `"occasion": null`.
 
 ## Storage and Hamravesh decision
 
-SQLite is the local development choice, as preferred by the challenge.
-Its default file is the ignored `backend/.local/expenses.sqlite3`. The optional
-`SQLITE_PATH` environment variable selects an absolute file path and the backend
-creates its parent directory. SQLite CI uses a disposable file under the runner's
-temporary directory; SQLite tests use a separate in-memory database. Database files
-and local environment files must not be version controlled.
+SQLite is the preferred local development database. Its default file is ignored
+at `backend/.local/expenses.sqlite3`; `SQLITE_PATH` selects another absolute path.
+Tests use an isolated in-memory SQLite database. A configured `DATABASE_URL`
+takes precedence and selects PostgreSQL via `dj-database-url` and Psycopg 3.
+Empty, malformed, non-PostgreSQL, or host/database-less URLs fail startup with a
+sanitized error; absent URLs retain SQLite. Environment/database files stay out
+of version control and Docker contexts.
 
-**Production storage decision: managed PostgreSQL 17 on Hamravesh.** The healthy
-resource is `expense-db` in cluster `hamravesh-c11`, namespace
-`saeidirasoul-expense-sharing`. Its connection panel lists the database name as
-`postgres`; this differs from the resource name. The backend connects over the
-internal cluster network. No public database access or connection from a
-developer's Mac is required. The application must be accessible from Iran;
-deployment and application connectivity have not yet been verified.
+Production uses existing separate Hamravesh backend/frontend apps and managed
+PostgreSQL 17. The recorded resource is `expense-db`, cluster `hamravesh-c11`,
+namespace `saeidirasoul-expense-sharing`, with database name `postgres`. Verify
+these values, current health, actual app identities, private connectivity, and TLS
+requirements before an authorized release. Credentials remain private runtime
+settings, never build arguments or CI inputs. No public database exposure or
+Mac-to-production connection is required.
 
-`DATABASE_URL`, when present, takes precedence over `SQLITE_PATH`. Django uses
-`dj-database-url` to configure its PostgreSQL backend and Psycopg 3 (the binary
-distribution includes its client libraries). A placeholder is
-`postgresql://DB_USER:DB_PASSWORD@INTERNAL_DB_HOST:5432/postgres`. Use the actual
-host, port, and credentials from the connection panel only in Hamravesh's private
-backend environment. Percent-encode special characters in credentials; URL
-query options, including TLS configuration, are preserved. Empty, malformed,
-non-PostgreSQL URLs, or URLs lacking a host/database name fail startup with a
-sanitized configuration error instead of selecting SQLite. When `DATABASE_URL`
-is absent, the existing local `.env`, default SQLite file, and `SQLITE_PATH`
-override continue to work.
+The new backend readiness check queries participants, the occasion canonical-name
+column, and the expense occasion column. Missing 0002 or 0004 schema returns 503;
+liveness remains independent of database access. Therefore run the additive
+pending migrations through 0004 from the new code/image through a **verified
+provider command mechanism**, while the previous app remains available, before promoting the new
+backend. After backend health/API acceptance, promote the frontend. Old clients
+can still submit expenses without an occasion; a stale old frontend's participant
+creation attempt will receive 405 and requires reload. The exact provider
+mechanism and release acceptance remain pending; no one-off job facility is
+assumed. [Operations](operations.md) describes backup/rehearsal, bounded migration
+locks, release-branch deployment, checks, and rollback leaving schema 0002–0004 intact.
+No production operation has been executed for this change.
 
-At deployment time, run `python manage.py check --deploy`,
-`python manage.py migrate --noinput`, and `python manage.py seed_participants`
-from the production backend image inside
-Hamravesh, with the private production environment injected, before serving
-traffic. Seeds remain idempotent and preserve existing data. No production
-credentials belong in Git or GitHub CI. No deployment or production data
-operation has been performed. Day 4 still needs authorized deployment, internal
-backend connectivity, and backup/restore verification for managed PostgreSQL.
+## Production packaging
 
-## Day 4 packaging boundary
+Both Dockerfiles build from repository-root context with `.dockerignore`. The
+backend installs locked production dependencies, selects `config.production`,
+and runs Gunicorn on port 8000 as UID/GID 10001. Production requires PostgreSQL,
+a private key, exact allowed hosts, and an exact frontend CORS origin. The
+JSON-only API needs no static server. Migrations/seeds never run during build or
+web startup; the runtime has Python but no uv, pytest, or Ruff.
 
-Both Dockerfiles build from the repository root with its `.dockerignore`.
-The backend installs only locked production dependencies and runs Gunicorn
-through `config.wsgi:application`, using `config.production` on port 8000 as a
-non-root user. That settings module requires PostgreSQL, a production key,
-explicit allowed hosts, and one exact frontend CORS origin; local SQLite and
-both existing database CI jobs retain `config.settings`. The JSON-only API
-requires no static asset server. Migrations and seeds are one-off release
-commands, never part of builds or worker startup.
-
-The frontend builds with npm ci/Vite and a required public `VITE_API_BASE_URL`
-build argument, then serves `dist` with Nginx on port 80, including `/health/`
-and SPA fallback. The URL is compiled into JavaScript and changes require a
-rebuild. The typed client and Day 3 application behaviors remain unchanged.
-Production defaults to HTTPS redirects and trusts no forwarded scheme header
-until the actual ingress sanitization/header contract is verified. Health
-probes are exempt from redirects. HSTS awaits HTTPS verification.
-
-[Production packaging](production-packaging.md) records the complete environment
-contract, deployment-check warnings, ingress requirements, and disposable local
-`compose.smoke.yml` workflow. That PostgreSQL 17 tmpfs database is independent
-of Hamravesh. Packaging ends before cloud resources or deployment.
+The frontend uses npm ci/Vite, a required public `VITE_API_BASE_URL` build argument,
+and Nginx on port 80 with `/health/` and SPA fallback. The URL is compiled into
+JavaScript, so changing it requires rebuilding. Production defaults leave Django
+HTTPS redirection false and trust no forwarded scheme header: the verified
+Hamravesh ingress must own public HTTP-to-HTTPS redirects. Proxy trust and HSTS
+require actual ingress/HTTPS verification. Health paths support internal HTTP
+with allowed Host checks. See [production packaging](production-packaging.md).
 
 ## Checks and CI
 
-`.github/workflows/ci.yml` runs on pull requests and pushes to `main` with
-`Backend checks`, `Frontend checks`, `PostgreSQL 17 checks`, and `Browser tests`.
-It also includes `Production images`; the existing four job definitions remain
-unchanged. The image job builds both root-context Dockerfiles, uses public
-disposable settings, migrates/seeds a temporary PostgreSQL 17 database, and runs
-the existing container HTTP/API smoke before cleanup. It publishes no image and
-performs no deployment. [Operations](operations.md) defines the future
-main-to-release promotion, verified provider configuration, backups, restore,
-and rollback procedure. The independent browser
-job installs both lockfiles and Chromium with Ubuntu system dependencies, then
-runs the real-server journey with public disposable settings and no secrets.
-Python 3.13 and Node 24 are selected from the projects' version files.
-uv installs from `backend/uv.lock` using
-`uv sync --locked`; npm installs from `frontend/package-lock.json` using
-`npm ci`. The jobs run the same Django, pytest, Ruff, frontend lint, TypeScript,
-Vitest, and build checks documented in the README.
+Backend checks cover models, serializers, anonymous/read-only contracts,
+filtering, global/scoped finances, duplicate insertion races, health behavior,
+seed preservation, actual 0001-to-current migration preservation, 0002-to-0003
+and 0003-to-0004 collision handling, Unicode canonical equivalence, and old-code
+writes after upgrade.
+Frontend Vitest/React Testing Library tests mock HTTP at fetch, exercise the real
+typed client, and cover forms, caches, filters, errors, cancellation, and offline
+writes. Playwright uses real Django/Vite with a fresh temporary SQLite database,
+disables dotenv/inherited PostgreSQL settings, migrates/seeds, then cleans up.
+Its journey covers optional occasions, required fields, historical ungrouped expenses,
+global/filtered balances, independent tab selections/clearing, deletion/stale 404, keyboard focus, offline
+failure dismissal, and desktop/320px screenshots. Reports/traces are ignored.
 
-The existing Backend checks job keeps SQLite and the Frontend checks job stays
-independent. Backend CI sets explicit public CI-only settings and
-`PYTHON_DOTENV_DISABLED=1`. It uses neither a developer `.env` nor production
-secrets. It applies migrations and seeds twice before checking migration drift,
-Django configuration, tests,
-and style. Health liveness avoids the database. Readiness queries the participant
-table, returning 503 when the connection or schema is unavailable; an empty
-usable table is ready.
-
-The PostgreSQL job starts a disposable `postgres:17` service with a readiness
-check and public CI-only credentials, then sets `DATABASE_URL`. It verifies
-the PostgreSQL backend and server major version, applies migrations, seeds
-twice, checks migration drift and Django configuration, and runs the backend
-tests. pytest-django uses a separate `test_<database-name>` PostgreSQL database;
-its CI user has permission to create it. SQLite tests continue to use an
-in-memory database. Focused settings tests isolate their environment and never
-change the active test connection. CI does not connect to Hamravesh and uses no
-Hamravesh credentials.
-
-## Four-day plan
-
-| Day | Scope | Status |
-| --- | --- | --- |
-| 1 | Scaffold, Participant and Expense models, migration, idempotent seeds, read-only participants API, health checks, participant page states, focused tests, CI, setup and architecture docs. | Implemented locally; first GitHub-hosted CI execution awaits an authorized push/PR. |
-| 2 | Expense creation/list APIs, input validation, pairwise balance calculation and API, focused financial and API tests. | Implemented locally in slices 1 and 2; CI execution awaits an authorized push/PR. |
-| 3 | One-page Expenses and Balances views, accessible Add Expense and optional Add Person dialogs, compact amount/date presentation, submission and refresh behavior, frontend integration tests. | Complete locally: unit tests and the real Django/Vite Chromium journey cover participant creation and desktop/phone layouts. Browser CI configured; GitHub-hosted execution awaits an authorized push/PR. |
-| 4 | Package production images; later verify Hamravesh/cloud access, managed PostgreSQL connectivity, authorized deployment, and submission. | Production packaging implemented; cloud/deployment work remains pending and unauthorized. |
+`.github/workflows/ci.yml` runs five jobs on PRs and pushes to `main`:
+**Backend checks**, **Frontend checks**, **PostgreSQL 17 checks**, **Browser tests**,
+and **Production images**. Python 3.13/Node 24 come from project version files;
+uv/npm install lockfiles. PostgreSQL CI uses disposable public credentials and
+an isolated `test_<database-name>` database; SQLite uses disposable/in-memory
+storage. Images CI builds and runs the disposable tmpfs PostgreSQL Compose smoke,
+then removes it. It publishes no images and deploys nothing. PRs targeting
+`release` run CI; pushes to `release` do not trigger this workflow or deploy.
+The runbook requires reviewed green promotion and deployment of recorded release
+artifacts. No CI job uses Hamravesh credentials or production data.

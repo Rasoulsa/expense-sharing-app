@@ -1,9 +1,10 @@
 # Day 4 production packaging
 
-This slice packages the existing Day 3 application. It preserves the typed API,
-Add Person, individual expense deletion, pairwise balances, local SQLite, and
-the existing PostgreSQL 17 CI job. Cloud provisioning, deployment, production
-migrations, and production connectivity checks remain separate authorized work.
+The images package seeded read-only participants, Add Occasion, optional UI
+occasion selection, historical ungrouped expenses, expense filtering, individual
+expense deletion, and global/occasion-scoped pairwise balances. Local SQLite and PostgreSQL 17 CI
+remain supported. Production migration/promotion and connectivity checks are
+separate authorized work for the existing Hamravesh apps.
 
 [Operations](operations.md) defines the future green-PR promotion from `main` to
 `release`, separate app configuration, release preparation, backup/restore,
@@ -110,25 +111,42 @@ authorized.
 
 Backend `/health/live/` and `/health/ready/` are exempt from HTTPS redirects for
 internal HTTP probes. Liveness needs no database; readiness requires the
-participant table. Probes must send an allowed `Host`; the Docker liveness probe
+participant/occasion tables, the expense occasion column (0002), and the
+occasion canonical-name column (0004). Probes must send an allowed `Host`; the Docker liveness probe
 uses the first parsed `ALLOWED_HOSTS` entry, after trimming whitespace and
 removing empty entries. Configure readiness on port 8000 separately in the
 hosting platform so traffic waits for migrations and database access.
 
 ## Release commands, separate from web startup
 
-With the private runtime environment injected into a one-off backend container,
-run these commands once for a release, before admitting traffic:
+For the existing apps, apply pending 0002/0003 and
+`expenses.0004_occasion_canonical_names` from the
+**new backend code/image** before promoting it, while the current app remains available.
+The exact Hamravesh mechanism for private candidate command execution must be
+verified; no one-off job facility is assumed. Follow [operations](operations.md)
+for backup/restore rehearsal, migration SQL/plan and lock limits, verification,
+backend-first/frontend-second promotion, and rollback without reversing 0002–0004.
+Readiness verifies the required 0002/0004 columns; separately verify all migrations
+and the non-null, nonblank, unique `canonical_name` constraint. 0004 stops before
+backfill with conflicting IDs/spellings under trim/NFC/casefold/NFC comparison.
+0003 remains unchanged and may stop earlier on its limited SQL-lowercase check. Resolve
+only through explicitly reviewed renames preserving IDs and expense assignments.
+The core candidate commands, after those gates and with private settings injected,
+are:
 
 ```sh
 python manage.py check --deploy
-python manage.py migrate --noinput
-python manage.py seed_participants
+python manage.py migrate --plan
+python manage.py migrate expenses 0004 --noinput
+python manage.py migrate --check
 ```
 
-Use `python` from the image's PATH; uv is deliberately absent from the runtime.
-The seed remains idempotent and preserves participant IDs, added people, and
-expenses. A missing schema yields readiness 503 while liveness remains 200.
+Use Python from the image's PATH; uv is absent. The additive migration preserves
+all existing participants/expenses and leaves old expenses ungrouped. Seeding is
+for fresh databases, not routine cleanup of existing production data; it remains
+idempotent and preserves every existing participant and expense. Missing 0002/0004 schema
+makes new-backend readiness 503 while liveness remains 200. No production migration
+has been executed for this change.
 
 Review `check --deploy` output rather than suppressing warnings:
 
@@ -171,8 +189,9 @@ docker compose -f compose.smoke.yml down --volumes --remove-orphans
 ```
 
 The smoke checks both HTTP health paths, database readiness, Nginx SPA fallback,
-exact CORS permission, all four seeds, Add Person, expense creation/listing,
-reverse pair netting, individual deletion and repeated-delete 404, and seed
+exact CORS permission, four read-only seeded participants, occasion creation and
+filtering, assigned and ungrouped expense creation/listing, global/filtered
+reverse pair netting, individual deletion/repeated-delete 404, and seed
 preservation after writes. It intentionally modifies only the disposable local
 database. The existing SQLite/Vitest/Playwright suites and PostgreSQL CI remain
 the wider regression checks.

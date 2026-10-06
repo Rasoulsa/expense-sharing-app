@@ -5,10 +5,11 @@ import App from './App'
 import type { Expense } from './api'
 
 const participants = [{ id: 17, name: 'Maya' }, { id: 93, name: 'Theo' }, { id: 204, name: 'Zoe' }]
+const occasions = [{ id: 55, name: 'Dinner' }, { id: 72, name: 'Trip' }]
 const expense: Expense = {
   id: 81,
   paid_by: participants[0],
-  expense_for: participants[1],
+  expense_for: participants[1], occasion: occasions[0],
   amount: '12.30',
   description: 'Train tickets',
   created_at: '2026-10-04T14:00:00Z',
@@ -19,6 +20,7 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 })
 const fetchMock = vi.fn<typeof fetch>()
 const participantsResponse = vi.fn<() => Promise<Response>>()
+const occasionsResponse = vi.fn<() => Promise<Response>>()
 const expensesResponse = vi.fn<() => Promise<Response>>()
 const balancesResponse = vi.fn<() => Promise<Response>>()
 const postResponse = vi.fn<() => Promise<Response>>()
@@ -50,14 +52,16 @@ async function openLoadedModal() {
   renderApp()
   const dialog = openModal()
   await within(dialog).findAllByRole('option', { name: 'Maya' })
+  await within(dialog).findByRole('option', { name: 'Dinner' })
   return dialog
 }
 
-function fillForm({ paidBy = '17', expenseFor = '93', amount = '12.3', description = 'Train tickets' } = {}) {
-  fireEvent.change(screen.getByLabelText('Paid by'), { target: { value: paidBy } })
-  fireEvent.change(screen.getByLabelText('Expense for'), { target: { value: expenseFor } })
-  fireEvent.change(screen.getByLabelText('Amount'), { target: { value: amount } })
-  fireEvent.change(screen.getByLabelText('Description'), { target: { value: description } })
+function fillForm({ paidBy = '17', expenseFor = '93', occasion = '55', amount = '12.3', description = 'Train tickets' } = {}) {
+  fireEvent.change(screen.getByLabelText(/^Paid by/), { target: { value: paidBy } })
+  fireEvent.change(screen.getByLabelText(/^Expense for/), { target: { value: expenseFor } })
+  fireEvent.change(screen.getByLabelText(/^Occasion/), { target: { value: occasion } })
+  fireEvent.change(screen.getByLabelText(/^Amount/), { target: { value: amount } })
+  fireEvent.change(screen.getByLabelText(/^Description/), { target: { value: description } })
 }
 
 function submit() {
@@ -65,14 +69,16 @@ function submit() {
 }
 
 function expectRetainedValues() {
-  expect((screen.getByLabelText('Paid by') as HTMLSelectElement).value).toBe('17')
-  expect((screen.getByLabelText('Expense for') as HTMLSelectElement).value).toBe('93')
-  expect((screen.getByLabelText('Amount') as HTMLInputElement).value).toBe('12.3')
-  expect((screen.getByLabelText('Description') as HTMLTextAreaElement).value).toBe('Train tickets')
+  expect((screen.getByLabelText(/^Paid by/) as HTMLSelectElement).value).toBe('17')
+  expect((screen.getByLabelText(/^Expense for/) as HTMLSelectElement).value).toBe('93')
+  expect((screen.getByLabelText(/^Occasion/) as HTMLSelectElement).value).toBe('55')
+  expect((screen.getByLabelText(/^Amount/) as HTMLInputElement).value).toBe('12.3')
+  expect((screen.getByLabelText(/^Description/) as HTMLTextAreaElement).value).toBe('Train tickets')
 }
 
 beforeEach(() => {
   participantsResponse.mockReset().mockImplementation(() => Promise.resolve(json(participants)))
+  occasionsResponse.mockReset().mockImplementation(() => Promise.resolve(json(occasions)))
   expensesResponse.mockReset().mockImplementation(() => Promise.resolve(json([])))
   balancesResponse.mockReset().mockImplementation(() => Promise.resolve(json([])))
   postResponse.mockReset().mockImplementation(() => Promise.resolve(json(expense, 201)))
@@ -80,6 +86,7 @@ beforeEach(() => {
     const path = new URL(String(input)).pathname
     if (path === '/api/expenses/' && options?.method === 'POST') return postResponse()
     if (path === '/api/participants/') return participantsResponse()
+    if (path === '/api/occasions/') return occasionsResponse()
     if (path === '/api/expenses/') return expensesResponse()
     if (path === '/api/balances/') return balancesResponse()
     throw new Error(`Unexpected request: ${path}`)
@@ -133,7 +140,7 @@ describe('Add Expense modal', () => {
     participantsResponse.mockReturnValueOnce(pending.promise)
     renderApp()
     const dialog = openModal()
-    expect(within(dialog).getByRole('status').textContent).toContain('Loading participants')
+    expect(within(dialog).getByText('Loading participants…')).toBeTruthy()
     expect((within(dialog).getByRole('button', { name: 'Save Expense' }) as HTMLButtonElement).disabled).toBe(true)
     await act(async () => { pending.resolve(json(participants)) })
     await within(dialog).findAllByRole('option', { name: 'Maya' })
@@ -161,6 +168,60 @@ describe('Add Expense modal', () => {
     expect(participantsResponse).toHaveBeenCalledTimes(2)
   })
 
+  it('loads occasion options, keeps all existing participants, and marks four fields as required and leaves Occasion optional', async () => {
+    const dialog = await openLoadedModal()
+    expect(within(screen.getByRole('combobox', { name: 'Occasion' })).getAllByRole('option').map((option) => option.textContent)).toEqual(['No occasion', 'Dinner', 'Trip'])
+    for (const label of ['Paid by', 'Expense for', 'Amount', 'Description']) {
+      const field = within(dialog).getByLabelText(new RegExp(`^${label}`)) as HTMLInputElement
+      expect(field.required).toBe(true)
+      const marker = dialog.querySelector(`label[for="${field.id}"] .required-mark`)!
+      expect(marker.textContent).toBe('*')
+      expect(marker.getAttribute('aria-hidden')).toBe('true')
+    }
+    const occasion = screen.getByRole('combobox', { name: 'Occasion' }) as HTMLSelectElement
+    expect(occasion.required).toBe(false)
+    expect(dialog.querySelector(`label[for="${occasion.id}"] .required-mark`)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Add Person' })).toBeNull()
+    expect(within(screen.getByRole('combobox', { name: 'Paid by' })).getByRole('option', { name: 'Zoe' })).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([url, options]) => new URL(String(url)).pathname === '/api/participants/' && options?.method === 'POST')).toHaveLength(0)
+  })
+
+  it.each(['loaded', 'empty', 'error', 'pending'])('saves without an occasion when the lookup is %s and omits its payload field', async (state) => {
+    if (state === 'empty') occasionsResponse.mockResolvedValueOnce(json([]))
+    if (state === 'error') occasionsResponse.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    if (state === 'pending') occasionsResponse.mockReturnValueOnce(new Promise(() => {}))
+    postResponse.mockResolvedValueOnce(json({ ...expense, occasion: null }, 201))
+    expensesResponse.mockImplementation(() => Promise.resolve(json([{ ...expense, occasion: null }])))
+    renderApp()
+    const dialog = openModal()
+    await within(dialog).findAllByRole('option', { name: 'Maya' })
+    if (state === 'error') expect((await within(dialog).findByRole('alert')).textContent).toContain('You can save with No occasion')
+    if (state === 'empty') await within(dialog).findByText('No occasions yet. You can save with No occasion.')
+    fillForm({ occasion: '' })
+    expect((screen.getByRole('button', { name: 'Save Expense' }) as HTMLButtonElement).disabled).toBe(false)
+    submit()
+    await waitFor(() => { expect(screen.queryByRole('dialog')).toBeNull() })
+    const options = fetchMock.mock.calls.find(([, options]) => options?.method === 'POST')![1]!
+    expect(JSON.parse(options.body as string)).toEqual({ paid_by: 17, expense_for: 93, amount: '12.3', description: 'Train tickets' })
+    expect(await screen.findByRole('heading', { name: 'Train tickets' })).toBeTruthy()
+  })
+
+  it('shows occasion loading and retry without dismissing the expense form', async () => {
+    const pending = pendingResponse()
+    occasionsResponse.mockReturnValueOnce(pending.promise).mockImplementation(() => Promise.resolve(json(occasions)))
+    renderApp()
+    const dialog = openModal()
+    expect(within(dialog).getByText('Loading occasions…')).toBeTruthy()
+    await within(dialog).findAllByRole('option', { name: 'Maya' })
+    expect((within(dialog).getByRole('button', { name: 'Save Expense' }) as HTMLButtonElement).disabled).toBe(false)
+    await act(async () => { pending.resolve(new Response('Unavailable', { status: 503 })) })
+    expect((await within(dialog).findByRole('alert')).textContent).toContain('Could not load occasions')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry occasions' }))
+    await within(dialog).findByRole('option', { name: 'Dinner' })
+    expect(within(dialog).queryByRole('alert')).toBeNull()
+    expect((within(dialog).getByRole('button', { name: 'Save Expense' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it.each([{ people: [] }, { people: [participants[0]] }])('prevents saving when fewer than two participants are available: $people', async ({ people }) => {
     participantsResponse.mockResolvedValueOnce(json(people))
     renderApp()
@@ -175,12 +236,12 @@ describe('Add Expense modal', () => {
     submit()
     expect(screen.getByRole('alert').textContent).toBe('Check the highlighted fields.')
     for (const label of ['Paid by', 'Expense for', 'Amount', 'Description']) {
-      const field = screen.getByLabelText(label)
+      const field = screen.getByLabelText(new RegExp(`^${label}`))
       expect(field.getAttribute('aria-invalid')).toBe('true')
       const ids = field.getAttribute('aria-describedby')!.split(' ')
       expect(ids.some((id) => document.getElementById(id)?.className === 'field-error')).toBe(true)
     }
-    expect(document.activeElement).toBe(screen.getByLabelText('Paid by'))
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Paid by/))
     expect(postResponse).not.toHaveBeenCalled()
   })
 
@@ -189,7 +250,7 @@ describe('Add Expense modal', () => {
     fillForm({ expenseFor: '17' })
     submit()
     expect(screen.getByText('Choose a different participant from the payer.')).toBeTruthy()
-    expect(document.activeElement).toBe(screen.getByLabelText('Expense for'))
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Expense for/))
     expect(postResponse).not.toHaveBeenCalled()
   })
 
@@ -197,8 +258,8 @@ describe('Add Expense modal', () => {
     await openLoadedModal()
     fillForm({ amount })
     submit()
-    expect(screen.getByLabelText('Amount').getAttribute('aria-invalid')).toBe('true')
-    expect(document.activeElement).toBe(screen.getByLabelText('Amount'))
+    expect(screen.getByLabelText(/^Amount/).getAttribute('aria-invalid')).toBe('true')
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Amount/))
     expect(postResponse).not.toHaveBeenCalled()
   })
 
@@ -206,7 +267,7 @@ describe('Add Expense modal', () => {
     await openLoadedModal()
     fillForm({ description })
     submit()
-    expect(screen.getByLabelText('Description').getAttribute('aria-invalid')).toBe('true')
+    expect(screen.getByLabelText(/^Description/).getAttribute('aria-invalid')).toBe('true')
     expect(postResponse).not.toHaveBeenCalled()
   })
 
@@ -246,7 +307,7 @@ describe('Add Expense modal', () => {
     const [url, options] = fetchMock.mock.calls.find(([, options]) => options?.method === 'POST')!
     expect(new URL(String(url)).pathname).toBe('/api/expenses/')
     expect(options?.headers).toEqual({ Accept: 'application/json', 'Content-Type': 'application/json' })
-    expect(JSON.parse(options!.body as string)).toEqual({ paid_by: 17, expense_for: 93, amount: '12.3', description: 'Train tickets' })
+    expect(JSON.parse(options!.body as string)).toEqual({ paid_by: 17, expense_for: 93, occasion: 55, amount: '12.3', description: 'Train tickets' })
     await waitFor(() => {
       expect(client.getQueryData(['expenses'])).toEqual([expense])
       expect(client.getQueryData(['balances'])).toEqual([{ debtor: participants[1], creditor: participants[0], amount: '12.30' }])
@@ -267,6 +328,46 @@ describe('Add Expense modal', () => {
     submit()
     await waitFor(() => { expect(balancesResponse).toHaveBeenCalledTimes(1) })
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('refreshes the active expenses, global balances, and cached occasion balances after creation', async () => {
+    const created = { ...expense, id: 82, description: 'Coffee' }
+    let saved = false
+    fetchMock.mockImplementation((input, options) => {
+      const url = new URL(String(input))
+      if (options?.method === 'POST') {
+        saved = true
+        return Promise.resolve(json(created, 201))
+      }
+      if (url.pathname === '/api/participants/') return Promise.resolve(json(participants))
+      if (url.pathname === '/api/occasions/') return Promise.resolve(json(occasions))
+      if (url.pathname === '/api/balances/') return Promise.resolve(json([]))
+      return Promise.resolve(json(saved ? [created, expense] : [expense]))
+    })
+    const client = renderApp()
+    fireEvent.click(await screen.findByRole('button', { name: 'Show expenses for Dinner' }))
+    await screen.findByRole('heading', { name: 'Train tickets' })
+    fireEvent.click(screen.getByRole('tab', { name: 'Balances' }))
+    await screen.findByText('No outstanding balances.')
+    const select = screen.getByRole('combobox', { name: 'Filter balances by occasion' })
+    await within(select).findByRole('option', { name: 'Dinner' })
+    fireEvent.change(select, { target: { value: '55' } })
+    await screen.findByText('No outstanding balances for Dinner.')
+    fireEvent.click(screen.getByRole('tab', { name: 'Expenses' }))
+    openModal()
+    await screen.findByRole('option', { name: 'Dinner' })
+    await screen.findAllByRole('option', { name: 'Maya' })
+    fillForm({ description: 'Coffee' })
+    submit()
+    await screen.findByRole('heading', { name: 'Coffee' })
+    await waitFor(() => {
+      expect(client.getQueryData(['expenses'])).toEqual([created, expense])
+      expect(client.getQueryData(['expenses', { occasion: 55 }])).toEqual([created, expense])
+      expect(client.getQueryData(['balances'])).toEqual([])
+      expect(client.getQueryData(['balances', { occasion: 55 }])).toEqual([])
+    })
+    expect(screen.getByRole('button', { name: 'Clear filter' })).toBeTruthy()
+    expect(fetchMock.mock.calls.filter(([input]) => new URL(String(input)).pathname === '/api/balances/').map(([input]) => new URL(String(input)).search)).toEqual(['', '?occasion=55', '', '?occasion=55'])
   })
 
   it('cancels a read started before the save and keeps fresh data if that old response arrives later', async () => {
@@ -292,6 +393,7 @@ describe('Add Expense modal', () => {
     postResponse.mockResolvedValueOnce(json({
       paid_by: ['This participant no longer exists.'],
       expense_for: ['Choose another beneficiary.'],
+      occasion: ['This occasion no longer exists.'],
       amount: ['Amount was rejected.', 'Use a smaller amount.'],
       description: ['Please clarify the description.'],
       non_field_errors: ['Please review this expense.'],
@@ -302,11 +404,11 @@ describe('Add Expense modal', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('Please review this expense.')
     expect(screen.getByRole('dialog', { name: 'Add Expense' })).toBe(dialog)
     expectRetainedValues()
-    for (const label of ['Paid by', 'Expense for', 'Amount', 'Description']) {
-      expect(screen.getByLabelText(label).getAttribute('aria-invalid')).toBe('true')
+    for (const label of ['Paid by', 'Expense for', 'Occasion', 'Amount', 'Description']) {
+      expect(screen.getByLabelText(new RegExp(`^${label}`)).getAttribute('aria-invalid')).toBe('true')
     }
     expect(screen.getByText('Amount was rejected. Use a smaller amount.')).toBeTruthy()
-    expect(document.activeElement).toBe(screen.getByLabelText('Paid by'))
+    expect(document.activeElement).toBe(screen.getByLabelText(/^Paid by/))
     expect(expensesResponse).toHaveBeenCalledTimes(1)
     expect(balancesResponse).not.toHaveBeenCalled()
     fillForm({ amount: '10.00' })
@@ -345,7 +447,7 @@ describe('Add Expense modal', () => {
     expect(form.getAttribute('aria-busy')).toBe('true')
     expect(within(dialog).getByRole('status').textContent).toBe('Saving expense…')
     expect((screen.getByRole('button', { name: 'Close Add Expense' }) as HTMLButtonElement).disabled).toBe(true)
-    expect(screen.getByLabelText('Amount').closest('fieldset')!.disabled).toBe(true)
+    expect(screen.getByLabelText(/^Amount/).closest('fieldset')!.disabled).toBe(true)
     fireEvent.submit(form)
     fireEvent.keyDown(dialog, { key: 'Escape' })
     fireEvent(dialog, new Event('cancel', { bubbles: true, cancelable: true }))

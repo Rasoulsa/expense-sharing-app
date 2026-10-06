@@ -43,7 +43,7 @@ import django
 from django.http import Http404
 from django.test import Client
 django.setup()
-from expenses.views import ExpenseDelete, ExpenseListCreate, ParticipantList
+from expenses.views import ExpenseDelete, ExpenseListCreate, OccasionListCreate, ParticipantList
 
 def describe(response):
     return {
@@ -58,6 +58,7 @@ results = []
 # Mock only database-facing methods; production middleware and API handlers run.
 with (
     patch.object(ParticipantList, "get_queryset", return_value=[]),
+    patch.object(OccasionListCreate, "get_queryset", return_value=[]),
     patch.object(ExpenseListCreate, "get_queryset", return_value=[]),
     patch("expenses.views.calculate_balances", return_value=[]),
     patch.object(ExpenseDelete, "get_object", side_effect=Http404),
@@ -68,11 +69,14 @@ with (
             headers["HTTP_X_FORWARDED_PROTO"] = scheme
         results.append({
             "participants": describe(client.get("/api/participants/", **headers)),
+            "occasions": describe(client.get("/api/occasions/", **headers)),
             "expenses": describe(client.get("/api/expenses/", **headers)),
             "balances": describe(client.get("/api/balances/", **headers)),
             "post_person": describe(client.post(
                 "/api/participants/", data={"name": ""},
                 content_type="application/json", **headers)),
+            "post_occasion": describe(client.post(
+                "/api/occasions/", data={}, content_type="application/json", **headers)),
             "post_expense": describe(client.post(
                 "/api/expenses/", data={}, content_type="application/json", **headers)),
             "delete_missing": describe(client.delete("/api/expenses/999/", **headers)),
@@ -92,7 +96,7 @@ import django
 from django.db import OperationalError, connection
 from django.test import Client
 django.setup()
-from expenses.models import Participant
+from expenses.models import Expense, Occasion, Participant
 
 def describe(response):
     return {"status": response.status_code, "body": response.json(),
@@ -101,9 +105,19 @@ def describe(response):
 client = Client(HTTP_HOST="api.example.test")
 with patch.object(connection, "cursor", side_effect=AssertionError("Database accessed")):
     live = describe(client.get("/health/live/"))
-with patch.object(Participant.objects, "exists", return_value=False) as query:
+with (
+    patch.object(Participant.objects, "exists", return_value=False) as participant_query,
+    patch.object(Occasion.objects, "values_list") as occasion_query,
+    patch.object(Expense.objects, "values_list") as expense_query,
+):
+    occasion_query.return_value.first.return_value = None
+    expense_query.return_value.first.return_value = None
     ready = describe(client.get("/health/ready/"))
-    query.assert_called_once_with()
+    participant_query.assert_called_once_with()
+    occasion_query.assert_called_once_with("canonical_name", flat=True)
+    occasion_query.return_value.first.assert_called_once_with()
+    expense_query.assert_called_once_with("occasion_id", flat=True)
+    expense_query.return_value.first.assert_called_once_with()
 with patch.object(Participant.objects, "exists", side_effect=OperationalError("unavailable")):
     unavailable = describe(client.get("/health/ready/"))
 with patch.object(connection, "cursor", side_effect=AssertionError("Database accessed")):
@@ -183,7 +197,10 @@ def test_production_api_requests_do_not_redirect(production_probe):
         for name, response in responses.items():
             assert response["location"] is None
             assert response["cors"] == "https://app.example.test"
-            if name.startswith("post_"):
+            if name == "post_person":
+                assert response["status"] == 405
+                assert response["body"]["detail"]
+            elif name.startswith("post_"):
                 assert response["status"] == 400
                 assert response["body"]
             elif name == "delete_missing":

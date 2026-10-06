@@ -5,15 +5,34 @@ from decimal import Decimal
 from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
-from expenses.models import Expense, Participant
+from expenses.models import Expense, Occasion, Participant
+from expenses.names import canonical_occasion_name
 
 
 class ParticipantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Participant
         fields = ["id", "name"]
+        read_only_fields = fields
+
+
+class OccasionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Occasion
+        fields = ["id", "name"]
         read_only_fields = ["id"]
-        extra_kwargs = {"name": {"trim_whitespace": True}}
+        extra_kwargs = {"name": {"trim_whitespace": True, "validators": []}}
+
+    @staticmethod
+    def name_exists(name):
+        return Occasion.objects.filter(canonical_name=canonical_occasion_name(name)).exists()
+
+    def validate_name(self, value):
+        if self.name_exists(value):
+            raise serializers.ValidationError(
+                "An occasion with this name already exists (case-insensitive)."
+            )
+        return value
 
     def create(self, validated_data):
         try:
@@ -21,9 +40,9 @@ class ParticipantSerializer(serializers.ModelSerializer):
                 return super().create(validated_data)
         except IntegrityError:
             # A concurrent request may have claimed the name after validation.
-            if Participant.objects.filter(name=validated_data["name"]).exists():
+            if self.name_exists(validated_data["name"]):
                 raise serializers.ValidationError(
-                    {"name": ["A person with this name already exists."]}
+                    {"name": ["An occasion with this name already exists (case-insensitive)."]}
                 ) from None
             raise
 
@@ -51,9 +70,26 @@ class ParticipantIdField(serializers.PrimaryKeyRelatedField):
         return super().to_internal_value(data)
 
 
+class OccasionIdField(serializers.PrimaryKeyRelatedField):
+    def to_internal_value(self, data):
+        if type(data) is not int or not 0 < data <= 2**63 - 1:
+            raise serializers.ValidationError("Occasion ID must be a positive JSON integer.")
+        return super().to_internal_value(data)
+
+
+class OccasionFilterSerializer(serializers.Serializer):
+    occasion = serializers.RegexField(r"\A[0-9]+\Z", required=False, trim_whitespace=False)
+
+    def validate_occasion(self, value):
+        if len(value) > 19 or not 0 < int(value) <= 2**63 - 1:
+            raise serializers.ValidationError("Enter a positive integer occasion ID.")
+        return int(value)
+
+
 class ExpenseSerializer(serializers.ModelSerializer):
     paid_by = ParticipantIdField(queryset=Participant.objects.all())
     expense_for = ParticipantIdField(queryset=Participant.objects.all())
+    occasion = OccasionIdField(queryset=Occasion.objects.all(), required=False, allow_null=True)
     amount = ExpenseAmountField(source="amount_cents")
     description = serializers.CharField(
         max_length=Expense._meta.get_field("description").max_length
@@ -62,7 +98,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Expense
-        fields = ["id", "paid_by", "expense_for", "amount", "description", "created_at"]
+        fields = ["id", "paid_by", "expense_for", "occasion", "amount", "description", "created_at"]
         read_only_fields = ["id"]
 
     def validate(self, attrs):
@@ -76,6 +112,9 @@ class ExpenseSerializer(serializers.ModelSerializer):
         data = super().to_representation(instance)
         data["paid_by"] = ParticipantSerializer(instance.paid_by).data
         data["expense_for"] = ParticipantSerializer(instance.expense_for).data
+        data["occasion"] = (
+            OccasionSerializer(instance.occasion).data if instance.occasion is not None else None
+        )
         return data
 
 

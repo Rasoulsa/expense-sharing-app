@@ -1,11 +1,13 @@
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000'
 
 export type Participant = { id: number; name: string }
+export type Occasion = { id: number; name: string }
 
 export type Expense = {
   id: number
   paid_by: Participant
   expense_for: Participant
+  occasion: Occasion | null
   amount: string
   description: string
   created_at: string
@@ -20,11 +22,12 @@ export type Balance = {
 export type NewExpense = {
   paid_by: number
   expense_for: number
+  occasion?: number | null
   amount: string
   description: string
 }
 
-export const expenseFields = ['paid_by', 'expense_for', 'amount', 'description'] as const
+export const expenseFields = ['paid_by', 'expense_for', 'occasion', 'amount', 'description'] as const
 export type ExpenseField = typeof expenseFields[number]
 export type ExpenseValidationErrors = Partial<Record<ExpenseField | 'non_field_errors', string[]>>
 export type ApiValidationErrors = ExpenseValidationErrors & { name?: string[] }
@@ -56,13 +59,20 @@ export function getParticipants(signal?: AbortSignal): Promise<Participant[]> {
   return getJson('/api/participants/', signal)
 }
 
-export function getExpenses(signal?: AbortSignal): Promise<Expense[]> {
-  return getJson('/api/expenses/', signal)
+export function getOccasions(signal?: AbortSignal): Promise<Occasion[]> {
+  return getJson('/api/occasions/', signal)
 }
 
-export function getBalances(signal?: AbortSignal): Promise<Balance[]> {
-  return getJson('/api/balances/', signal)
+export function getExpenses(signal?: AbortSignal, occasionId?: number): Promise<Expense[]> {
+  const filter = occasionId === undefined ? '' : `?occasion=${occasionId}`
+  return getJson(`/api/expenses/${filter}`, signal)
 }
+
+export function getBalances(signal?: AbortSignal, occasionId?: number): Promise<Balance[]> {
+  const filter = occasionId === undefined ? '' : `?occasion=${occasionId}`
+  return getJson(`/api/balances/${filter}`, signal)
+}
+
 
 async function postJson<T>(path: string, data: unknown): Promise<T> {
   const response = await fetch(new URL(path, API_BASE_URL), {
@@ -93,8 +103,8 @@ export function createExpense(expense: NewExpense): Promise<Expense> {
   return postJson('/api/expenses/', expense)
 }
 
-export function createParticipant(person: { name: string }): Promise<Participant> {
-  return postJson('/api/participants/', person)
+export function createOccasion(occasion: { name: string }): Promise<Occasion> {
+  return postJson('/api/occasions/', occasion)
 }
 
 export async function deleteExpense(id: number): Promise<void> {

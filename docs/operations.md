@@ -1,78 +1,93 @@
 # Release and operations runbook
 
-This describes a future authorized release. No commit, push, PR, branch
-promotion, image publication, cloud provisioning, production migration, backup,
-or deployment has been performed. Local container smoke checks use disposable
-PostgreSQL 17 only. Public HTTPS ingress, public URLs, connectivity from Iran,
-and managed-database backup/restore have **not** been tested.
+This is the proposed procedure for an **authorized update of the existing
+Hamravesh backend and frontend apps**, using the existing PostgreSQL database
+and reviewed `release` branch. No production command, backup, migration, branch
+promotion, image publication, or deployment has been executed for this change.
+Local checks use disposable databases only. Actual provider controls, current
+app identities, ingress, connectivity from Iran, and backup restoration require
+verification before a release.
 
-[Production packaging](production-packaging.md) defines the images and runtime
-environment; [architecture](architecture.md) records the API/storage decisions.
-Preserve Add Person, individual expense deletion with confirmation, and pairwise
-balances during release and rollback. The API remains anonymous.
+[Production packaging](production-packaging.md) defines images/settings;
+[architecture](architecture.md) defines contracts. The new application has seeded,
+read-only participants, Add Occasion, optional occasion selection in the UI,
+ungrouped historical and new expenses, independent occasion filtering in each tab, individual
+confirmed deletion, and global-by-default or occasion-scoped pairwise balances.
+Preserve **all existing participants and expenses**.
 
-## Values requiring verification
+## Release order and provider verification gate
 
-| Item | Recorded choice or proposed value | Pending verification |
+The safe order is **reviewed release artifact → verified backup and restore
+rehearsal → pending migrations through 0004 from new backend code/image
+while the current app remains available → new backend promotion and API checks → new frontend promotion
+and browser checks**. Do not promote the new backend first and hope a readiness
+503 resolves: readiness queries the 0004 occasion key and the expense occasion
+column. Use the candidate containing migrations 0002–0004 and `expenses/names.py`;
+older images cannot apply missing migration code. Separately verify migration
+history and the canonical-key constraint; readiness alone does not prove its
+uniqueness or canonical data is correct.
+
+| Item | Recorded value | Verify before release |
 | --- | --- | --- |
-| Branches | `main` for integration; `release` for production promotion | `release` does not exist locally yet. Its authorized creation, branch protection, and required checks must be established. |
-| Database | Recorded Hamravesh resource `expense-db`, PostgreSQL 17, cluster `hamravesh-c11`, namespace `saeidirasoul-expense-sharing`; database name `postgres` | Current panel identity, health, version, internal connectivity, privileges, and TLS requirements. The resource name is not the database name. |
-| Backend app | Separate app, proposed name `expense-api`, container port **8000** | Actual app name, cluster/namespace, registry access, resources, rollout controls, one-off command facility, and probes. |
-| Frontend app | Separate app, proposed name `expense-web`, container port **80** | Actual app name, registry access, resources, routing, and rollout controls. |
-| Public backend origin | `https://api.example.com` is a placeholder | Actual DNS, certificate, ownership, and access from Iran. |
-| Public frontend origin | `https://app.example.com` is a placeholder | Actual DNS, certificate, ownership, and access from Iran. |
-| HTTPS proxy | Hamravesh terminates TLS; its domain ingress owns HTTPS Redirect. No forwarded scheme header trusted by default | HTTPS Redirect enabled on every public app domain, non-looping HTTPS, Host preservation, and prevention of ingress bypass. Verify header/value sanitization before enabling any proxy-header trust. |
-| Backups | Private encrypted durable storage, recurring and pre-release backups, restore drill | Provider controls, destination, frequency/retention, operator, recovery objectives, restore privileges, and any point-in-time recovery capability. |
+| Branches | `main` integration, existing local `release` branch for production | Remote branch heads, protections, five required checks, and how each existing app builds/deploys that branch. |
+| Database | Recorded `expense-db`, PostgreSQL 17, cluster `hamravesh-c11`, namespace `saeidirasoul-expense-sharing`, database name `postgres` | Actual identity/health/version, private connectivity, schema privileges, TLS, backup controls, restore privileges. Resource name differs from database name. |
+| Backend app | Existing separate app, port 8000 | Actual app identifier, current digest/commit/settings, registry or Git build mechanism, rollout/probes/logs, candidate execution without changing public traffic. Do not assume its name is `expense-api`. |
+| Frontend app | Existing separate app, port 80 | Actual app identifier, current digest/commit, compiled API origin, build/release mechanism and rollback controls. Do not assume its name is `expense-web`. |
+| Public origins | Existing backend and frontend HTTPS origins | DNS/certificates, exact allowed hosts/CORS, access from Iran. `api.example.com`/`app.example.com` are placeholders. |
+| Candidate migration command | **Unverified: exact Hamravesh panel action/API/CLI syntax** | Record the real mechanism, parameters, candidate image digest/source SHA, private environment/network injection, command override, exit status/log access, and absence of public routing. |
+| Backups | Private encrypted durable storage | Retention, operator, recovery objectives, verified restore drill and any PITR capability. Do not assume these are enabled. |
 
-Never deploy placeholder domains or disposable CI secrets. Verify the panel's
-actual app, probe, rollout, and release-command controls before the steps below;
-this document does not invent provider UI fields or CLI commands. Keep automatic
-deployment on ordinary pushes disabled; promotion requires a reviewed release.
+**The exact provider command mechanism is a release gate, not an assumed one-off
+job feature.** Verify it in the panel/provider documentation or with provider
+support and rehearse it on an isolated database. It must execute Python from the
+**new** backend artifact on the database's private network, with production
+settings injected privately, while the existing live app keeps its image and
+routing. If available, an isolated candidate execution environment or temporary
+private app with a command override may satisfy this; neither capability is
+asserted here. Record the exact verified action/command in the private release
+record before proceeding. A shell in the old running image is insufficient.
+Do not copy new source into live containers or make database access public.
+If no suitable mechanism exists, postpone promotion until an equivalent safe
+provider-supported mechanism is verified. Do not stop or replace the healthy
+app merely to obtain migration code.
 
-## 1. Green PR into main, then promote to release
+Keep ordinary-push automatic deployment disabled or gated by the reviewed release
+approval. Confirm the actual app integration before changing settings. No new
+cloud app/database provisioning is needed for this update.
 
-1. When authorized, submit the feature branch as a PR into `main`. Review the
-   complete diff, including Docker context exclusions, lockfiles, production
-   settings, migration compatibility, and operations instructions. Require five
-   green checks: **Backend checks**, **Frontend checks**, **PostgreSQL 17 checks**,
-   **Browser tests**, and **Production images**.
-2. Merge only after review and green checks on the current PR revision. Wait for
-   the push-to-`main` run to pass all five jobs. Record that exact main commit as
-   `approved_main_sha`; later commits do not automatically become approved.
-3. After the release branch has been established through an authorized action,
-   open a promotion PR from the approved `main` revision into `release`. Freeze
-   `main` through the promotion if using it as the source branch; a changed head
-   needs new review/checks. Require the same five green checks. PRs to any target
-   run CI, but pushes only to `main` run CI; pushing `release` neither triggers
-   this workflow nor deploys.
-4. Merge the approved promotion when authorized. Record the resulting
-   `release_sha` and verify its tree equals the approved main tree:
+## 1. Review and promote the release artifact
+
+1. When separately authorized, review the feature PR into `main`, including all
+   new source/migration files, API compatibility, Docker exclusions, and this
+   runbook. Require **Backend checks**, **Frontend checks**, **PostgreSQL 17 checks**,
+   **Browser tests**, and **Production images** green on the current revision.
+2. After the approved merge, require the five checks on that exact `main` commit
+   and record `approved_main_sha`. Later commits are not automatically approved.
+3. Promote the approved revision into `release` through a reviewed, authorized
+   PR. Freeze the source revision; require the same checks. CI runs for PRs to
+   any target and pushes to `main`; a push to `release` alone runs no workflow
+   and deploys nothing in repository CI. Verify provider triggers separately.
+4. Record the final `release_sha` and compare its tree with approved main:
 
    ```sh
    git diff --exit-code "$approved_main_sha" "$release_sha" --
    ```
 
-   A merge commit can have a different SHA. Any content difference stops this
-   release and needs a new review/check run. Build from the recorded release
-   commit, not a moving branch tip.
-5. Keep a private release record containing both SHAs, final image digests,
-   verified public origins, migration plan, pre-release backup reference,
-   previous image digests/settings, operator, time, and acceptance results.
-   Keep credentials and production data out of Git and CI logs.
+   Any content difference stops release for review/checks. Build/deploy from the
+   recorded revision, not an unfrozen moving branch tip.
+5. Privately record release/main SHAs, candidate and previous image digests,
+   current settings, verified app identifiers/origins, command mechanism,
+   migration plan, backup reference, operator/time, and acceptance results.
+   Keep credentials and database snapshots out of Git and public logs.
 
-The **Production images** job builds both existing Dockerfiles from root context
-with locked dependencies, uses public `VITE_API_BASE_URL=http://localhost:8000`,
-and runs the existing disposable Compose/HTTP smoke workflow. It publishes no
-images, uses no Hamravesh environment, and cleans up even after failure.
-GitHub-hosted Linux must provide Docker Engine/Compose; the job checks both and
-fails clearly if unavailable. Check the [runner software manifest](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)
-if runner capabilities change.
+The Production images CI job builds and checks a disposable PostgreSQL 17 stack;
+it publishes no image and has no Hamravesh access. Its localhost frontend URL is
+not a production artifact.
 
-## 2. Build final images and configure separate apps
+## 2. Prepare new artifacts without promoting the apps
 
-From a clean checkout of `release_sha`, set the verified `public_api_origin`
-and authorized registry/release tags. These variables hold public identifiers,
-not credentials. Build using repository root context:
+Build from a clean checkout of `release_sha`. For the verified image workflow,
+set authorized tags and the actual public backend origin:
 
 ```sh
 docker build -f backend/Dockerfile -t "$backend_image_tag" .
@@ -81,173 +96,45 @@ docker build -f frontend/Dockerfile \
   -t "$frontend_image_tag" .
 ```
 
-Publish through the verified registry workflow only when authorized. Record the
-registry digests and select those immutable digests in Hamravesh. The CI
-frontend's localhost URL cannot be used in production. Changing the public API
-URL requires a new frontend build/digest; runtime environment cannot update
-its bundle. Never put credentials in `VITE_` values or Docker build arguments.
-Base-image tags are mutable, so later rebuilds are new artifacts to revalidate.
+Publish only through the separately authorized registry workflow and record
+immutable digests. If the existing apps use Git builds, verify that the provider
+builds the same root-context Dockerfiles from the recorded release SHA and records
+identifiable artifacts **without immediately promoting the backend**. A build
+from a moving branch or an old image is not the migration candidate. Revalidate
+rebuilt images because base tags are mutable.
 
-Configure two apps in the verified network/namespace:
+Retain the current apps and previous artifacts. Verify candidate settings against
+existing settings; this release does not require credential rotation or URL changes:
 
-- Backend: backend digest, port 8000, image's Gunicorn command and non-root
-  UID/GID 10001. Keep `DJANGO_SETTINGS_MODULE=config.production`, `DEBUG=false`,
-  and `PYTHON_DOTENV_DISABLED=1`. No startup dependency installation is needed.
-- Frontend: frontend digest, port 80, image's Nginx command, `/health/`, and SPA
-  fallback. No database or secret environment is needed.
-- Privately inject backend `DATABASE_URL` using the connection panel's internal
-  host/port/user, recorded database name `postgres`, and verified TLS options.
-  Percent-encode special characters in URL credentials. SQLite is for local/CI
-  use; the production module requires PostgreSQL.
-- Privately inject a random backend `SECRET_KEY` of at least 50 characters with
-  five distinct characters; development keys are rejected. Keep it stable
-  across ordinary releases and rollback.
-- Set exact backend hostnames in `ALLOWED_HOSTS`, including the specific internal
-  Host needed by probes. No schemes, ports, `*`, or subdomain wildcards. Set
-  `CORS_ALLOWED_ORIGIN` to the verified frontend origin without a trailing slash;
-  no wildcard origins or credentialed CORS.
-- Leave `SECURE_PROXY_SSL_HEADER`/`SECURE_PROXY_SSL_VALUE` unset until ingress
-  header/value and sanitization are verified, then set both explicitly.
-  Gunicorn's implicit forwarded-scheme trust is disabled; forwarded-host/port
-  trust stays disabled. Clients must not bypass the trusted ingress.
-- Enable Hamravesh's **HTTPS Redirect** setting at the domain ingress for every
-  public backend and frontend domain before serving users. Hamravesh terminates
-  TLS and must redirect public HTTP requests to HTTPS.
-- Leave `SECURE_SSL_REDIRECT` unset or set it to `false` (the production default).
-  Remove any stale `true` override from the backend environment. Django receives
-  HTTP behind the TLS ingress; enabling its redirect without a verified scheme
-  header makes public HTTPS API requests redirect to the same HTTPS URL.
-  Start with `SECURE_HSTS_SECONDS=0`; after HTTPS verification, consider a short
-  duration such as 3600. Subdomain inclusion and preload stay false.
+- Backend: port 8000, image Gunicorn command, UID/GID 10001,
+  `DJANGO_SETTINGS_MODULE=config.production`, `DEBUG=false`,
+  `PYTHON_DOTENV_DISABLED=1`, private PostgreSQL `DATABASE_URL` with verified TLS,
+  and the stable private `SECRET_KEY`. Never print or supply secrets as build args.
+- Exact `ALLOWED_HOSTS`, including the internal probe Host, and exact
+  `CORS_ALLOWED_ORIGIN` for the public frontend. No wildcard/credentialed CORS.
+- Frontend: port 80, Nginx command, `/health/`, SPA fallback, and the public API
+  origin compiled into the image. Runtime environment cannot replace that URL.
+- Public HTTP-to-HTTPS redirects belong to the verified Hamravesh domain ingress.
+  Leave `SECURE_SSL_REDIRECT` unset/false; stale true settings can cause HTTPS
+  self-redirects behind TLS termination. Trust no forwarded scheme header until
+  its exact value/sanitization and ingress bypass prevention are verified.
+  Keep HSTS at 0 until HTTPS checks pass; preserve reviewed settings on rollback.
 
-Verify that ingress strips spoofed headers, preserves the intended Host,
-redirects public HTTP, and serves HTTPS without a redirect loop. None of those
-Hamravesh behaviors has been tested yet. Follow
-[Django's proxy requirements](https://docs.djangoproject.com/en/5.2/ref/settings/#secure-proxy-ssl-header).
+No migration/seed runs in image builds or Gunicorn startup. The runtime has
+Python on PATH, not uv, pytest, pg_dump, or pg_restore.
 
-## 3. Back up and run one-off release commands
+## 3. Back up and rehearse against a restored database
 
-1. Review `python manage.py migrate --plan` in a one-off candidate backend
-   container with its private runtime settings. Record compatibility with the
-   previous backend. Packaging adds no database migration; the existing initial
-   application migration remains unchanged.
-2. Take and verify the pre-release backup below. If migration needs stopped
-   writes, use a verified ingress maintenance/routing control or stop public
-   backend traffic before backup/migration. Hiding the frontend alone does not
-   stop anonymous API writes. Retain private operator access for release commands.
-   Provider maintenance controls remain pending verification.
-3. Keep candidate traffic closed. Run this sequence once inside the candidate
-   backend image, with the private production environment injected:
+Before touching live schema, verify managed backups, off-instance destination,
+retention, restore permissions, and recovery objectives. Take a retained,
+consistent pre-release backup; verify it by restoring to a **new isolated target**.
+Provider scheduling/storage and PITR remain pending verification.
 
-   ```sh
-   set -eu
-   python manage.py check --deploy
-   python manage.py migrate --noinput
-   python manage.py seed_participants
-   python manage.py migrate --check
-   ```
-
-   Stop on any failure. PATH contains the locked Python environment; uv is not
-   in the runtime. Never attach migrations/seeding to image builds or worker
-   startup. Rerun only when needed to recover an interrupted/failed release.
-   Seeds are idempotent: missing Alice, Bob, Charlie, and David are created;
-   existing IDs, added people, and expenses remain unchanged. A fresh database
-   creates four people, and a second seed creates zero. No expenses are seeded.
-4. Start the backend candidate and gate traffic on readiness. Roll out the
-   frontend candidate. Keep the previous image pair available until acceptance
-   passes, then record the outcome before ending maintenance.
-
-### Actual check --deploy warnings
-
-Production defaults report **W003**, **W004**, and **W008**, with none silenced:
-
-| Warning | Reason and action |
-| --- | --- |
-| `security.W003` | No `CsrfViewMiddleware`. DRF is intentionally anonymous, JSON-only, and has no session/cookie authentication. Keep the warning visible; CORS is not authorization. Revisit CSRF if cookie-based authority is introduced in future scope. |
-| `security.W004` | HSTS duration is 0 pending real HTTPS verification. Local HTTP smoke does not verify HTTPS or HSTS. |
-| `security.W008` | Django's `SECURE_SSL_REDIRECT` is false because Hamravesh's domain ingress handles HTTP-to-HTTPS redirects. This is expected with proxy-managed redirects. Keep the warning visible and require HTTPS Redirect on every public app domain; do not enable Django redirects just to remove it. |
-
-The disposable HTTP environment also sets `SECURE_SSL_REDIRECT=false` and reports
-the same warnings. Existing image CI overrides it to true only for the deploy-check
-command and reports W003/W004; that override does not represent production defaults
-or test a TLS ingress. With positive HSTS duration and the current false subdomain/preload
-flags, W004 is replaced by **W005** and **W021**. Investigate any other warning
-or error. No production deploy check or HTTPS ingress test has been performed.
-
-## 4. Health and browser/API acceptance
-
-Provider probe UI fields, intervals, timeouts, startup allowance, and routing
-gates are pending verification. Configure these exact paths and ports:
-
-| Probe | Port/path | Expected result |
-| --- | --- | --- |
-| Backend liveness | 8000, `GET /health/live/` | 200 JSON `{"status":"alive"}` without database access. |
-| Backend readiness | 8000, `GET /health/ready/` | 200 JSON `{"status":"ready"}` when the database/schema work; 503 otherwise. An empty usable table is ready. |
-| Frontend health | 80, `GET /health/` | 200 text `ok`. |
-
-Backend probes must send an allowed Host. Both backend health paths accept
-internal HTTP checks without Django redirects and still validate Host. Docker's
-probe checks liveness with the first parsed `ALLOWED_HOSTS` entry, after trimming
-whitespace and removing empty entries; provider readiness must be configured
-separately.
-
-After authorized rollout, set verified `public_api_origin` and
-`public_frontend_origin` and run from a client in Iran:
-
-```sh
-curl --fail --silent --show-error "$public_api_origin/health/live/"
-curl --fail --silent --show-error "$public_api_origin/health/ready/"
-curl --fail --silent --show-error "$public_frontend_origin/health/"
-curl --fail --silent --show-error -D - \
-  -H "Origin: $public_frontend_origin" "$public_api_origin/api/participants/"
-curl --fail --silent --show-error -D - \
-  -H 'Origin: https://untrusted.example.test' "$public_api_origin/api/participants/"
-```
-
-The allowed origin must receive its exact `Access-Control-Allow-Origin`; the
-untrusted origin must receive no CORS permission. Curl can still read the
-anonymous API. Verify browser preflight for JSON POST and DELETE from the
-actual frontend. Test public HTTP redirects, non-looping HTTPS, and spoofed
-forwarded values through ingress using the verified header. Health 200 and
-deploy checks do not prove ingress behavior.
-
-In the browser, verify static assets, direct SPA navigation/reload, both tabs,
-participant dropdowns, and absence of CORS/mixed-content errors. Fresh seeded
-views should be empty. For an approved write smoke, record the existing
-Alice/Bob pair baseline and then:
-
-1. Create identifiable Alice-for-Bob `50.00` and Bob-for-Alice `20.00` expenses.
-   Capture their returned IDs, decimal string amounts, and UTC dates.
-2. Reload and verify persistence and a signed `30.00` shift toward Alice in
-   that pair, preserving other pairs. An initially empty pair reads “Bob owes
-   Alice $30.00”; do not assume an existing production pair starts empty.
-3. Cancel deletion and verify no change. Confirm deletion of the reverse
-   expense (204), reload, and verify a `50.00` shift from baseline. Repeating
-   that exact ID's DELETE returns 404.
-4. Delete only the remaining smoke expense through its confirmation. Verify
-   baseline expenses/balances return; never bulk-delete existing data.
-
-Disposable CI also verifies Add Person and seed preservation. Exercise Add
-Person in disposable/restore validation; a production participant is permanent
-under this API and should be added only when intended. Never use the local
-`backend/scripts/smoke_containers.py` for production or restored-data validation:
-it targets the fixed local Compose stack and expects fresh seeds/empty expenses.
-
-## 5. PostgreSQL backup
-
-Before the first live release, verify managed backup controls, off-instance
-destination, frequency/retention, operator, recovery point/time objectives, and
-restore privileges. Do not assume automated backups or point-in-time recovery
-are enabled. Require a successful restore drill and retained pre-release backup
-before relying on recovery. Provider scheduling/storage remain pending.
-
-For portable logical backup, use a trusted PostgreSQL **17** client environment
-inside the private network, such as an authorized operator job using
-`postgres:17`. The backend image lacks pg_dump/pg_restore. Privately inject
-`PGHOST`, `PGPORT`, `PGDATABASE=postgres`, `PGUSER`, and verified `PGSSLMODE`/
-certificate settings. Mount authentication in `PGPASSFILE` with mode 0600,
-outside the repository. Never print credentials or put a literal URL in commands.
-Confirm source identity, then run:
+For a portable logical backup, use a trusted PostgreSQL **17** client environment
+inside the private network through a verified operator mechanism. Privately
+inject `PGHOST`, `PGPORT`, `PGDATABASE=postgres`, `PGUSER`, TLS settings/certificates,
+and a mode-0600 `PGPASSFILE` outside the repository. Confirm the source identity;
+never put a literal credential URL in commands or enable shell tracing:
 
 ```sh
 set -eu
@@ -260,91 +147,359 @@ pg_restore --list "$backup_dir/expenses.dump" > "$backup_dir/manifest.txt"
 (cd "$backup_dir" && sha256sum expenses.dump > expenses.dump.sha256)
 ```
 
-The dump includes schema/data/sequences and Django migration history in one
-consistent snapshot, but not server-wide roles. The dump role needs read access
-to every required table. Retain archive/checksum, source identity, snapshot time,
-and matching image digests in approved encrypted durable storage with restricted
-access, outside Git and the database instance. Confirm upload completion; a file
-left in an ephemeral container is not a retained backup. Archive listing/checksum
-alone does not prove recovery. Periodically retrieve and restore an archive.
-See [PostgreSQL dump guidance](https://www.postgresql.org/docs/17/backup-dump.html).
+The archive contains schema, data, sequences, and Django migration history in a
+consistent snapshot, but not server-wide roles. The dump role needs all relevant
+table read privileges. Upload archive/checksum and source/time/image references
+to approved encrypted durable storage; confirm upload. An ephemeral file or
+archive listing alone is not recovery proof. See the
+[PostgreSQL backup reference](https://www.postgresql.org/docs/17/backup-dump.html).
 
-## 6. Restore drill or recovery
+Restore the retrieved archive into a unique empty database through verified
+private controls, never over the live `postgres` database:
 
-1. Retrieve the selected archive/checksum into a private operator directory,
-   set `restore_archive_dir` to its absolute path, and verify integrity:
+```sh
+set -eu
+(cd "$restore_archive_dir" && sha256sum --check expenses.dump.sha256)
+backup_archive="$restore_archive_dir/expenses.dump"
+restore_db=expense_restore_YYYYMMDD_UNIQUE
+test "$restore_db" != postgres
+createdb --maintenance-db=postgres "$restore_db"
+pg_restore --exit-on-error --single-transaction --no-owner --no-acl \
+  --dbname="$restore_db" "$backup_archive"
+```
 
-   ```sh
-   set -eu
-   (cd "$restore_archive_dir" && sha256sum --check expenses.dump.sha256)
-   backup_archive="$restore_archive_dir/expenses.dump"
-   ```
+Use a unique actual name, verified database-creation privileges, TLS, and an
+application-compatible restore role. Explicit `--dbname` overrides `PGDATABASE`.
+See the [restore reference](https://www.postgresql.org/docs/17/app-pgrestore.html).
+If the role cannot create a target, arrange an empty one via verified provider
+controls first.
 
-2. Keep production intact. Use a **new empty database** with a unique name;
-   never restore into the existing production `postgres` database. The commands
-   below assume a verified role may create databases on the selected server.
-   If it cannot, arrange an equivalent empty target through verified provider
-   controls first. Database creation/restore permissions remain pending.
+Point isolated previous and candidate backend artifacts at the restored target
+using private replacement connection settings; leave public routing closed.
+Record all participant/occasion/expense IDs and fields, counts, and global pairwise balances
+in private storage. Review candidate migration SQL/plan and run section 4 here
+first. Compare every old row, not just counts: original payer/beneficiary, amount,
+description, date, and IDs must match. Pre-0002 expenses acquire a null occasion;
+existing occasion IDs, spellings, and assignments must remain unchanged through
+0004, with canonical keys added correctly. Test old
+code inserting an ungrouped expense after migration, new occasion/expense
+creation with and without an occasion, case-variant duplicate errors, shared
+filtering/clearing, global versus filtered balances, and individual deletion only on
+this restored copy. Check sequences and record timing/lock behavior. Existing
+extra participants must remain selectable. Do not run the fresh-stack smoke
+script or automatic seed/reset against a restored target.
 
-   ```sh
-   set -eu
-   restore_db=expense_restore_YYYYMMDD
-   test "$restore_db" != postgres
-   createdb --maintenance-db=postgres "$restore_db"
-   pg_restore --exit-on-error --single-transaction --no-owner --no-acl \
-     --dbname="$restore_db" "$backup_archive"
-   psql --dbname="$restore_db" --set=ON_ERROR_STOP=1 \
-     --command='SELECT count(*) FROM expenses_participant; SELECT count(*) FROM expenses_expense; SELECT count(*) FROM django_migrations;'
-   ```
+The backup is a snapshot. Writes occurring afterward are not in it; retain the
+live database and account for newer writes in any recovery. A rehearsal does not
+repoint the live app. Capture/verify a current pre-migration backup after rehearsal
+if the rehearsal's backup is no longer the approved release recovery point.
 
-   Replace the date suffix with a unique target name. Explicit `--dbname`
-   overrides `PGDATABASE`; private authentication/TLS variables must describe
-   the selected server. Restore is one transaction and stops on failure.
-   Ownership/ACL omission requires choosing a restore role that grants verified
-   application access. Follow the [PostgreSQL restore reference](https://www.postgresql.org/docs/17/app-pgrestore.html).
-3. Point an isolated backend validation container at the restored target with a
-   private replacement `DATABASE_URL` and the image recorded with the backup.
-   Keep public traffic closed. Run `python manage.py check --deploy`,
-   `python manage.py migrate --check`, health/read-only API checks, and compare
-   recorded counts, IDs, amounts, dates, descriptions, and pairwise balances.
-   Create then delete a test expense in the restored target to verify sequences
-   and constraints. Do not automatically migrate/seed or use the fresh-stack
-   smoke script on a recovery target. Record success and elapsed recovery time.
-4. For real recovery, stop public writes, agree the recovery timestamp and
-   handling of newer writes, and preserve current data with a forensic backup
-   if possible. Obtain explicit authorization for data cutover. Change only the
-   backend's private connection setting to the validated restored database,
-   restart it, and repeat readiness/browser/API acceptance before admitting
-   traffic. Keep the original database until recovery and separate retention
-   approval are complete. A drill never repoints the live app.
+## 4. Apply pending migrations through 0004 before backend promotion
 
-## 7. Rollback
+Use the verified candidate command mechanism from the gate above. Confirm its
+artifact is the recorded **new backend digest/release SHA**, contains
+`expenses/migrations/0002_occasions.py` and
+`0003_occasion_case_insensitive_names.py`, `0004_occasion_canonical_names.py`, and
+`expenses/names.py`, selects the intended database privately,
+and has no public traffic. Keep the current backend/frontend serving normally.
+Only one operator/executor runs migrations; do not start competing migrations.
 
-Preserve previous backend/frontend digests, compiled frontend API origin,
-private backend settings, migration state, and backup reference before rollout.
-Roll back on failed readiness, increased errors, broken browser operations, or
-failed HTTPS/CORS acceptance. Provider rollback/log/metric controls are pending.
+From the new image's `/app` working directory, with private settings injected:
 
-1. Halt the candidate rollout. Keep traffic closed when writes/schema safety are
-   uncertain. Inspect logs without dumping secret environment values.
-2. For a compatible schema, select the previous backend/frontend **digests** in
-   their separate apps, restore changed settings from the private release record,
-   and wait for readiness. Preserve the database and stable key. The previous
-   frontend contains its previous API URL; changing it requires rebuilding.
-   Mutable tags or a fresh rebuild are not equivalent rollback artifacts.
-3. Packaging changes no schema, so its rollback needs no reverse migration.
-   On the first release, if there is no previous production image pair, stop
-   the candidate apps, keep traffic closed, preserve the database, and prepare
-   a reviewed fix; an unbuilt earlier source revision is not a rollback image.
-   For future incompatible migrations, use the reviewed migration rollback
-   plan or separate restore/cutover procedure. Do not guess a reverse migration
-   target or restore over the live database. Explicitly handle newer writes
-   and obtain authorization for any data loss.
-4. Repeat health, exact CORS, browser, and controlled API acceptance. Record
-   cause, artifacts, database state, and outcome before reopening traffic.
-   Reconcile `release` through a reviewed fix/revert PR and green CI afterward;
-   do not rewrite shared history.
+```sh
+set -eu
+set +x
+python manage.py check --deploy
+python manage.py showmigrations expenses
+python manage.py migrate --plan
+python manage.py sqlmigrate expenses 0002
+python manage.py sqlmigrate expenses 0003
+python manage.py sqlmigrate expenses 0004
+```
 
-These production procedures remain unexecuted. Branch controls, registry
-promotion, app settings, public HTTPS/URLs, internal PostgreSQL connectivity,
-and managed backup restoration still require separate deployment verification.
+Expect `[X] 0001_initial`; 0002/0003 have not yet been released in production,
+while local databases may already have them. 0004 is new. Verify actual migration
+history and the exact pending plan; unexpected migrations stop the release.
+Do not rewrite applied migrations. 0002 creates occasions and a nullable protected
+expense reference, without changing old rows. 0003 is unchanged. 0004 checks for
+Unicode-equivalent collisions, stages/backfills a canonical-key column, adds
+non-null/nonblank/unique constraints, and removes 0003's inadequate SQL-lowercase
+index. Review its shared Python canonicalization and both collision checks as well
+as `sqlmigrate`, which cannot show the runtime data checks. Do not use `--fake`,
+reverse migrations, or recreate the database.
+
+If the occasion table already exists, perform a read-only preflight from the new
+candidate code. Record diagnostics privately; names may be private business data:
+
+```sh
+python manage.py shell -c '
+from collections import defaultdict
+from expenses.models import Occasion
+from expenses.names import canonical_occasion_name
+by_key = defaultdict(list)
+for row_id, name in Occasion.objects.order_by("id").values_list("id", "name"):
+    by_key[canonical_occasion_name(name)].append((row_id, name))
+conflicts = [rows for key, rows in by_key.items() if not key or len(rows) > 1]
+for rows in conflicts:
+    print("Conflicting occasion rows:", repr(rows))
+raise SystemExit(1 if conflicts else 0)
+'
+```
+
+SQL `LOWER()` is not a Unicode-aware substitute for this check. Migration 0004
+also **stops with conflicting IDs and spellings before adding/backfilling**, and
+rechecks immediately before writing keys. Neither names nor expense assignments
+are changed. If there are conflicts, halt promotion and obtain an explicit owner
+decision for each distinct occasion's new name. Apply only reviewed name renames
+by ID through the verified private command mechanism, preserving all IDs and
+`Expense.occasion_id` values. Before 0004, the new model's save/update hooks require
+a column that is still absent: use reviewed private SQL or the historical migration
+model for these renames, then retry the migration. After 0004, use model saves or
+literal name updates so keys stay synchronized. There is no editing API.
+Never delete, merge, reassign, or blanket-null records. Back up and rehearse any
+rename separately, recheck for collisions, and retry. 0003 may stop earlier on
+its existing narrower check. Any concurrent old-code occasion write can invalidate
+preflight or fail after the new non-null key exists; stop occasion writes from an
+already-running 0002/0003 app through verified controls until candidate promotion.
+The current production 0001 app has no occasion writes and continues serving
+participants and expenses during the migration. Do not publish the new frontend
+or route the candidate before completing the entire chain.
+
+PostgreSQL DDL still acquires locks; additive does not guarantee zero blocking.
+Rehearse against realistic data/load, choose a low-traffic window, and set reviewed
+lock/statement limits on the migration connection. Example initial limits below
+are **subject to rehearsal**, not guaranteed sufficient for production volume:
+
+```sh
+set -eu
+set +x
+export PGOPTIONS="${PGOPTIONS:+$PGOPTIONS }-c lock_timeout=5s -c statement_timeout=60s"
+python manage.py shell -c "from django.db import connection; cursor = connection.cursor(); cursor.execute('SHOW lock_timeout'); print('lock_timeout:', cursor.fetchone()[0]); cursor.execute('SHOW statement_timeout'); print('statement_timeout:', cursor.fetchone()[0])"
+```
+
+Confirm the connection reports the reviewed limits (here `5s` and `1min`), not
+values overriding them through connection URL options. Stop if it does not. Then,
+in that same candidate execution environment:
+
+```sh
+set -eu
+python manage.py migrate expenses 0004 --noinput
+python manage.py showmigrations expenses
+python manage.py migrate --check
+```
+
+Stop on timeout/failure, inspect transaction/migration state through the candidate,
+and retry only after resolving the cause. Migrations 0002–0004 use Django's default
+transactional migration on PostgreSQL. Keep the old app routed; do not let a
+waiting migration block requests indefinitely or promote an unready candidate.
+If rehearsal cannot meet acceptable availability, stop release planning and
+agree a separate maintenance procedure before executing live changes.
+
+Verify 0002, 0003, and `0004_occasion_canonical_names` are all `[X]`, no pending
+migrations remain, and inspect schema through private SQL:
+
+```sql
+SELECT name FROM django_migrations
+WHERE app = 'expenses' ORDER BY name;
+SELECT table_name, column_name, is_nullable
+FROM information_schema.columns
+WHERE table_schema = current_schema()
+  AND ((table_name = 'expenses_expense' AND column_name = 'occasion_id')
+    OR table_name = 'expenses_occasion')
+ORDER BY table_name, ordinal_position;
+SELECT indexname, indexdef FROM pg_indexes
+WHERE schemaname = current_schema() AND tablename = 'expenses_occasion'
+  AND indexname IN ('occasion_canonical_name_unique', 'occasion_name_ci_unique');
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+WHERE conrelid = 'expenses_occasion'::regclass
+  AND conname IN ('occasion_canonical_name_unique', 'occasion_canonical_name_not_empty');
+SELECT count(*) AS occasions FROM expenses_occasion;
+SELECT count(*) AS participants FROM expenses_participant;
+SELECT count(*) AS expenses FROM expenses_expense;
+SELECT count(*) AS assigned_expenses FROM expenses_expense WHERE occasion_id IS NOT NULL;
+```
+
+Verify the FK/index/constraints against the reviewed SQL: `occasion_id` nullable,
+`canonical_name` NOT NULL and nonblank, `occasion_canonical_name_unique` present,
+and `occasion_name_ci_unique` absent. Verify stored keys read-only from the same
+candidate code:
+
+```sh
+python manage.py shell -c '
+from expenses.models import Occasion
+from expenses.names import canonical_occasion_name
+mismatches = [row_id for row_id, name, key in
+    Occasion.objects.values_list("id", "name", "canonical_name")
+    if key != canonical_occasion_name(name)]
+print("Canonical key mismatch IDs:", mismatches)
+raise SystemExit(1 if mismatches else 0)
+'
+```
+
+Preserve all prior display names, IDs, fields, and expense associations; only
+the new key is backfilled. Before new-code writes, occasions and
+assigned-expense counts should be zero for an initial 0002 rollout. With current
+traffic still writing, compare a private pre-migration baseline while accounting
+for legitimate concurrent creations/deletions; do not mistake a snapshot count
+for an exact live invariant. The restore rehearsal proves exact preservation
+without concurrent writes. Do not blanket-null existing assignments if this is
+a rerun after a partial release.
+
+Do **not** run seeding as routine cleanup on this existing database. Confirm the
+four seeds and all extra participants remain; if a seed is unexpectedly missing,
+investigate and separately review an idempotent `seed_participants` run. Never
+remove extra people or expenses to force a four-person count.
+
+Start the new backend candidate privately against the expanded schema. Require
+liveness/readiness 200 and read-only API checks before promotion. The candidate's
+readiness is expected to be 503 before the required 0002/0004 columns exist and
+must be 200 after all migrations complete; liveness
+requires no database even before migration. Failure leaves the current app serving
+and the additive schema intact for investigation.
+
+## 5. Promote backend, then frontend, and accept the release
+
+Configure verified provider probes/routing gates with an allowed backend Host:
+
+| Probe | Port/path | Expected |
+| --- | --- | --- |
+| Backend liveness | 8000 `/health/live/` | 200 `{"status":"alive"}`, no database access. |
+| Backend readiness | 8000 `/health/ready/` | 200 `{"status":"ready"}` only when participant/occasion tables, occasion canonical key, and expense occasion column are usable; 503 otherwise. Empty usable tables are ready. |
+| Frontend health | 80 `/health/` | 200 text `ok`. |
+
+Docker checks backend liveness; configure provider **readiness** separately.
+Verify actual probe intervals/timeouts/startup allowance and traffic gating.
+Promote the recorded backend artifact only after section 4 succeeds, and confirm
+health and the following API behavior on the new candidate/public backend:
+
+- Participants GET includes all prior IDs/names and seeds; POST/PUT/PATCH/DELETE
+  return 405. Do not send a participant-creation smoke to the old live backend.
+- Occasions GET 200 with stable name/ID ordering; expense responses include nested
+  occasion or null. All historical expenses remain visible unfiltered.
+- `?occasion=<existing-positive-id>` returns only that occasion in the unchanged
+  descending date/ID order; invalid IDs return field errors, unknown IDs `[]`.
+- Default global balances match the pre-release pairwise baseline, accounting for
+  real concurrent writes and including ungrouped expenses. Filtered balances use
+  only that occasion’s expenses before netting by pair; an empty occasion returns
+  `[]` and malformed IDs have the same field errors as the Expenses filter.
+- Trimmed, Unicode-normalized/casefolded equivalent names (including Été/été and
+  composed/decomposed accents) return HTTP 400 `name` errors, including insertion
+  races; the stored-key constraint is present and key values match the shared function. Rehearse writes on the restored copy.
+
+Exercise write/validation/duplicate-name/old-client omission cases on the restored
+copy before live promotion. Production occasion creation is permanent through
+this API: create only an intended real occasion with approval, not a disposable
+smoke name. Existing recorded expenses are never deleted as test cleanup.
+
+Then promote the frontend artifact built with the actual API origin. **New
+frontend on old backend does not provide the complete feature** if occasion
+endpoints or scoped balances are absent. Its No occasion save can tolerate a
+failed occasion lookup, but that is not full release acceptance.
+Old expense clients on new backend remain compatible through omitted/null occasion.
+A cached old UI may still offer Add Person and get 405; keep the backend/frontend
+gap short, verify HTML revalidation/hashed assets, and direct such clients to reload.
+Do not restore participant POST just to support stale UI.
+
+From a client in Iran, with verified public origins, check:
+
+```sh
+curl --fail --silent --show-error "$public_api_origin/health/live/"
+curl --fail --silent --show-error "$public_api_origin/health/ready/"
+curl --fail --silent --show-error "$public_frontend_origin/health/"
+curl --fail --silent --show-error -D - \
+  -H "Origin: $public_frontend_origin" "$public_api_origin/api/participants/"
+curl --fail --silent --show-error "$public_api_origin/api/occasions/"
+curl --fail --silent --show-error "$public_api_origin/api/expenses/"
+curl --fail --silent --show-error "$public_api_origin/api/balances/"
+curl --fail --silent --show-error -D - \
+  -H 'Origin: https://untrusted.example.test' "$public_api_origin/api/participants/"
+```
+
+Allowed origin receives the exact CORS permission; untrusted origin receives
+none, though curl can still read an anonymous API. Verify actual-browser JSON
+POST/DELETE preflight, HTTP redirect to HTTPS, non-looping HTTPS, spoofed proxy
+header behavior, and no CORS/mixed-content/console errors. Health does not prove
+HTTPS/ingress behavior.
+
+Desktop and **320px** browser acceptance: no Add Person; all seeded/extra
+participants available; Add Occasion trimmed required name, field-level duplicate
+errors, single save, and usable Cancel/Escape after network failure; new occasion
+selectable; four required Add Expense labels (Paid by, Expense for, Amount,
+Description) have red asterisks/accessible required state; Occasion is optional
+with No occasion omitting the POST field and saving despite empty/failed lookups;
+assigned names filter only Expenses; Balances offers All occasions/occasion
+choices and Clear filter, with its own independent selection. Switching tabs must
+retain each tab’s selection without copying it. Balances shows exactly one list:
+All occasions is the global pairwise net (possibly empty when opposite expenses
+cancel); a named occasion is that occasion’s net. Clearing only Expenses restores
+historical null-occasion rows; clearing only Balances restores the global net. Verify scoped totals are recomputed
+before pairwise netting, and deletion while filtered refreshes both scopes. Check keyboard
+focus/trapping/restoration, modal scrolling/Save visibility, reload persistence,
+and cancellation/confirmation of individual deletion.
+
+Perform the full write journey on the restored copy. If a separately approved
+live expense smoke is needed, use an intended existing occasion, record the
+pair's baseline and **only the newly created smoke IDs**, then verify 50.00/20.00
+opposite expenses shift that pair by 30.00 across occasions. Verify deletion
+cancellation, remove the reverse smoke ID and see a 50.00 shift, then delete only
+the remaining smoke ID through confirmation and restore the baseline. Never
+assume an empty production pair, delete a historical record, or bulk-delete.
+`backend/scripts/smoke_containers.py` is only for the fresh local Compose stack.
+
+### Deployment-check warnings
+
+`check --deploy` defaults report unsilenced W003 (anonymous JSON API without
+session/cookie authority or CSRF middleware), W004 (HSTS 0 awaiting verified
+HTTPS), and W008 (Django redirect false; ingress must redirect). With positive
+HSTS and false subdomain/preload flags, W005/W021 replace W004. Existing image CI
+sets redirect true only for its deploy-check command, showing W003/W004; that
+command does not validate production ingress. Investigate other errors/warnings
+and review [Django's proxy requirements](https://docs.djangoproject.com/en/5.2/ref/settings/#secure-proxy-ssl-header).
+
+## 6. Rollback and recovery
+
+Retain previous artifacts/settings, backup, and migration record before promotion.
+On failed readiness/API/browser acceptance or increased errors, halt rollout and
+inspect logs without dumping environments. Use verified provider traffic/rollback
+controls; do not guess their UI/CLI syntax.
+
+1. **Before promotion:** a failed candidate/migration leaves the current apps
+   routed. Investigate migration status/collisions; preserve all data. If pending 0002–0004 applied
+   successfully but candidate acceptance fails, leave the additive schema in
+   place and keep the old apps. Do not reverse it.
+2. **Frontend-only failure:** restore the previous frontend digest while retaining
+   the healthy new backend/schema. Expense creation without occasion still works;
+   the legacy participant button will receive 405 until a corrected frontend is
+   deployed. A reviewed compatible frontend fix is preferable.
+3. **Backend rollback required:** new frontend cannot remain on a backend lacking
+   occasions. Restore the previous frontend before restoring the previous backend
+   digest/settings, or use a prevalidated rollback artifact retaining the new API.
+   Wait for health/readiness and repeat acceptance. A full legacy-pair rollback
+   reintroduces its old participant-creation behavior and fails the new read-only
+   spec; record that tradeoff in the authorized release decision and prioritize
+   a reviewed fix. No claimed compatible rollback image exists without validation.
+4. **Leave migrations 0002–0004 applied on code rollback.** Old code ignores
+   the table/nullable column and continues writing ungrouped expenses. Occasion records and
+   assignments remain stored for recovery/fix-forward. `migrate expenses 0001`
+   would drop occasion data/associations: it is not a safe rollback step. Never
+   fake migrations, delete participants/expenses, or restore over the live database.
+   Code from 0002/0003 cannot create occasions without populating the retained
+   non-null canonical key and may return 500. Use a prevalidated rollback artifact
+   retaining the 0004 key-write/error handling, or fix forward. The original 0001
+   app can still write ungrouped expenses because it does not create occasions.
+   Do not drop the key constraint or add a blank default as a rollback workaround.
+5. **Database recovery only if needed:** stop public writes through verified
+   controls, take a private forensic backup if possible, agree recovery timestamp
+   and reconciliation of all newer writes, restore into a new empty database,
+   validate with the matching backend then the approved migration plan, and obtain
+   separate authorization for data cutover. Change only the private backend
+   connection to the validated target and repeat acceptance. Preserve the original
+   database until separate retention approval. A pre-release backup alone omits
+   newer writes and is not an automatic no-loss rollback.
+6. Record artifacts, schema state, incident/outcome, and acceptance. Reconcile
+   `release` through a reviewed fix/revert PR and green checks; do not rewrite
+   shared history or deploy an unreviewed moving branch.
+
+This runbook is proposed and unexecuted for this change. Exact candidate command,
+provider build/promotion/rollback controls, app identities/origins, backup restore,
+and public ingress acceptance remain verification items before production release.
